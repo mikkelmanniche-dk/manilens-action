@@ -1,0 +1,302 @@
+# ManiLens v2 — review af en PR i kollegaens eget repo med kollegaens eget Claude-abonnement.
+# Kaldes fra .github/workflows/manilens.yml (skabelon: templates/manilens-v2.yml), låst til fuld SHA.
+#
+# Fire job, adskilt af sikkerhedshensyn:
+#   forbered  OIDC → /api/admit (godkendt, installeret, dagsloft). Ingen checkout, ingen artefakter.
+#   tjek      kører PR'ens kode og scannere UDEN hemmeligheder og uden id-token
+#   review    læser koden med Claude (ingen Bash); har Claude-tokenet, men kun læseadgang og intet id-token
+#   post      OIDC → /api/token (ét repo, en time) og skriver reviewet som manilens[bot]; kører aldrig PR-kode
+# Motoren hentes altid fra mikkelmanniche-dk/manilens-action på den SHA, brokeren bekræfter —
+# aldrig fra et artefakt. Artefakter bærer kun data.
+name: ManiLens review
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: claude-opus-5
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: manilens-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CLAUDE_CODE_VERSION: 2.1.270
+  MANILENS_URL: https://manilens.mikkelmanniche.dk
+  MANILENS_TIER: sparsom
+
+jobs:
+  forbered:
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'manilens:pause') && !contains(github.event.pull_request.body, '@manilens ignore')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    outputs:
+      engine_sha: ${{ steps.admit.outputs.engine_sha }}
+    steps:
+      - name: Adgang hos ManiLens
+        id: admit
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          OIDC="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
+          echo "::add-mask::$OIDC"
+          BODY="$(jq -nc --argjson pr "$PR" '{purpose: "review", pr: $pr}')"
+          STATUS="$(curl -sS -o "$RUNNER_TEMP/admit.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/admit" \
+            -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
+          if [ "$STATUS" != "200" ]; then
+            MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/admit.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
+            MSG="${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            { echo "### ManiLens kører ikke"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$MSG"
+            exit 1
+          fi
+          SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/admit.json")"
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Brokeren gav en ugyldig motor-SHA."
+            exit 1
+          fi
+          echo "engine_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+  tjek:
+    needs: forbered
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Hent PR'ens kode
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: pr
+
+      - name: Hent motoren på den bekræftede SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mikkelmanniche-dk/manilens-action
+          ref: ${{ needs.forbered.outputs.engine_sha }}
+          persist-credentials: false
+          path: manilens
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.6
+
+      - name: Installer scannere (faste versioner, checksum-tjekket)
+        run: bash manilens/action/install_scanners.sh "$RUNNER_TEMP/scanners"
+
+      - name: Kør faste tjek og scannere
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: bash manilens/action/scanners.sh pr "$BASE_SHA" "$RUNNER_TEMP/scanners" "$RUNNER_TEMP/tools.md"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: manilens-tools
+          path: |
+            ${{ runner.temp }}/tools.md
+            ${{ runner.temp }}/tools.md.status.json
+            ${{ runner.temp }}/tools.md.counts.json
+          retention-days: 3
+
+  review:
+    needs: [forbered, tjek]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Hent PR'ens kode (køres ikke)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: pr
+
+      - name: Fjern PR-styret Claude-konfiguration (hooks, agenter, MCP)
+        run: rm -rf pr/.claude/settings.json pr/.claude/settings.local.json pr/.claude/agents pr/.claude/hooks pr/.claude/skills pr/.claude/commands pr/.mcp.json pr/CLAUDE.local.md
+
+      - name: Hent motoren på den bekræftede SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mikkelmanniche-dk/manilens-action
+          ref: ${{ needs.forbered.outputs.engine_sha }}
+          persist-credentials: false
+          path: manilens
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: manilens-tools
+          path: ${{ runner.temp }}/in
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Installer Claude Code
+        run: npm install -g --ignore-scripts=false "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+      - name: Saml diff, PR-tekst og tidligere fund
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          IN="$RUNNER_TEMP/in"
+          python3 manilens/action/incremental.py --src pr --repo "$REPO" --pr "$PR" \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --out "$IN/diff.raw.patch"
+          cp "$IN/diff.raw.patch" "$IN/diff.patch"
+          curl -sSfL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/pulls/$PR" \
+            | python3 -c 'import json,sys; p=json.load(sys.stdin); json.dump({"repo":p["base"]["repo"]["full_name"],"number":p["number"],"title":p["title"],"body":p["body"] or ""}, sys.stdout, ensure_ascii=False)' > "$IN/meta.json"
+          cd manilens/action && python3 collect_previous.py --repo "$REPO" --pr "$PR" --out "$IN/previous.json"
+
+      - name: ManiLens reviewer
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MANILENS_MODEL: ${{ inputs.model }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          IN="$RUNNER_TEMP/in"
+          bash manilens/action/run_engine.sh --src pr --diff "$IN/diff.patch" --meta "$IN/meta.json" \
+            --tools "$IN/tools.md" --previous "$IN/previous.json" \
+            --context-base "$BASE_SHA" --out "$IN/result.json" --log "$RUNNER_TEMP/engine.log"
+
+      # Oversigten er et tilvalg: fejler den, skal selve reviewet stadig postes.
+      - name: Byg review-oversigt (kun data)
+        continue-on-error: true
+        env:
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+          REVIEW_BASE: ${{ github.event.pull_request.base.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ['RUNNER_TEMP']) / 'in/result.json'
+          result = json.loads(p.read_text())
+          result['head_sha'] = os.environ['REVIEW_HEAD']
+          p.write_text(json.dumps(result, ensure_ascii=False))
+          PYCODE
+          python3 manilens/action/workspace.py --repo pr --base "$REVIEW_BASE" --head "$REVIEW_HEAD" \
+            --result "$RUNNER_TEMP/in/result.json" --out "$RUNNER_TEMP/snapshot" --json-only --repository "$REPO" \
+            --usage-raw "$RUNNER_TEMP/engine.log.raw.json" --scope "$RUNNER_TEMP/in/diff.raw.patch.scope.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: manilens-result
+          path: |
+            ${{ runner.temp }}/in/result.json
+            ${{ runner.temp }}/snapshot/snapshot.json
+            ${{ runner.temp }}/engine.log
+          retention-days: 14
+
+  post:
+    needs: [forbered, tjek, review]
+    if: always() && needs.forbered.result == 'success'
+    name: ManiLens
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - name: Token til at skrive på PR'en
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          ADMITTED_SHA: ${{ needs.forbered.outputs.engine_sha }}
+        run: |
+          set -euo pipefail
+          OIDC="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
+          echo "::add-mask::$OIDC"
+          BODY="$(jq -nc --argjson pr "$PR" '{purpose: "review-post", pr: $pr}')"
+          STATUS="$(curl -sS -o "$RUNNER_TEMP/token.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/token" \
+            -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
+          if [ "$STATUS" != "200" ]; then
+            MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/token.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
+            rm -f "$RUNNER_TEMP/token.json"
+            echo "::error::${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            exit 1
+          fi
+          TOKEN="$(jq -r '.data.token // empty' "$RUNNER_TEMP/token.json")"
+          SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/token.json")"
+          rm -f "$RUNNER_TEMP/token.json"
+          echo "::add-mask::$TOKEN"
+          if [ -z "$TOKEN" ] || [ "$SHA" != "$ADMITTED_SHA" ]; then
+            echo "::error::Motor-SHA fra token-kaldet matcher ikke den godkendte."
+            exit 2
+          fi
+          echo "GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Hent motoren på den bekræftede SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mikkelmanniche-dk/manilens-action
+          ref: ${{ needs.forbered.outputs.engine_sha }}
+          persist-credentials: false
+          path: manilens
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: manilens-result
+          path: ${{ runner.temp }}/out
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: manilens-tools
+          path: ${{ runner.temp }}/checks
+
+      - name: Gem review-oversigten
+        id: snapshot
+        continue-on-error: true
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          SNAPSHOT="$(find "$RUNNER_TEMP/out" -name snapshot.json | head -1)"
+          if [ -z "$SNAPSHOT" ]; then echo "::warning::Ingen review-oversigt at gemme."; exit 0; fi
+          env -u GITHUB_TOKEN python3 manilens/action/snapshot_upload.py --snapshot "$SNAPSHOT" --head "$HEAD" --pr "$PR" \
+            --scanner-counts "$RUNNER_TEMP/checks/tools.md.counts.json"
+
+      - name: Post review
+        env:
+          MANILENS_WORKSPACE_MODE: snapshot
+          MANILENS_REVIEW_BASE: ${{ github.event.pull_request.base.sha }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          SNAPSHOT_URL: ${{ steps.snapshot.outputs.snapshot_url }}
+        run: |
+          RESULT="$(find "$RUNNER_TEMP/out" -name result.json | head -1)"
+          if [ "$REVIEW_RESULT" != "success" ] || [ -z "$RESULT" ]; then
+            # Fail-closed: uden et gyldigt review bliver PR'en ikke godkendt.
+            python3 manilens/action/post_failure.py --repo "$REPO" --pr "$PR" --head "$HEAD" \
+              --run-url "$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"
+            exit 2
+          fi
+          cd manilens/action && python3 post_review.py --repo "$REPO" --pr "$PR" --head "$HEAD" --result "$RESULT" \
+            --checks "$RUNNER_TEMP/checks/tools.md.status.json" --snapshot-url "$SNAPSHOT_URL"

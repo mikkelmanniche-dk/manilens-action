@@ -1,0 +1,68 @@
+ManiLens Action — Proprietary License
+
+Copyright (c) 2026 Mikkel Manniche. All rights reserved.
+
+This repository and everything in it — including workflows, scripts, source code, prompts, agent
+instructions, rules, tests and documentation (together, the "Software") — is the exclusive property
+of Mikkel Manniche (the "Licensor"). The Software is NOT open source. Making the repository publicly
+visible does not grant any license, except the narrow permission in section 2.
+
+1. No rights unless expressly granted
+   No right, title or license is granted to anyone, by implication, estoppel or otherwise, except as
+   expressly stated in section 2. All rights not expressly granted are reserved by the Licensor.
+
+2. Limited permission to use through ManiLens
+   A person whom the Licensor has approved on https://manilens.mikkelmanniche.dk ("Approved User") may,
+   while that approval is in effect:
+   (a) reference the reusable workflows in this repository with "uses:" from GitHub Actions workflows
+       in the Approved User's own private, non-commercial repositories, pinned to a full commit SHA
+       that the Licensor has approved; and
+   (b) let GitHub Actions retrieve and execute the Software for that single purpose, which is to
+       receive code reviews through the ManiLens service.
+   This permission is personal, non-exclusive, non-transferable, non-sublicensable, free of charge
+   and revocable at any time. It ends automatically, without notice, when the approval is revoked or
+   when any term of this license is breached.
+
+3. Restrictions
+   Except as expressly permitted in section 2, you may not, in whole or in part:
+   (a) copy, reproduce, download for storage, mirror or archive the Software;
+   (b) modify, adapt, translate or create derivative works of the Software;
+   (c) distribute, publish, sublicense, sell, rent, lend or otherwise make the Software available to
+       anyone, including by offering it as a hosted or managed service;
+   (d) use the Software, or any prompt, instruction, rule or idea expressed in it, in another product
+       or service, or to build a competing product or service;
+   (e) use the Software for any commercial purpose, or on code belonging to an employer, client or
+       any other third party;
+   (f) use the Software or its contents to train, fine-tune, evaluate or benchmark any artificial
+       intelligence or machine-learning model;
+   (g) circumvent the approval, SHA pinning or any other access control of the ManiLens service; or
+   (h) remove, alter or obscure this notice or any copyright notice.
+
+4. GitHub
+   Viewing this repository and GitHub's built-in forking are permitted only to the minimum extent
+   required by the GitHub Terms of Service. A fork is not a license: no right to use, copy, modify or
+   distribute a fork, or anything in it, is granted beyond section 2.
+
+5. Feedback
+   Suggestions or vulnerability reports you send to the Licensor may be used freely by the Licensor
+   without any obligation to you.
+
+6. No warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+   LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY AND
+   NON-INFRINGEMENT.
+
+7. Limitation of liability
+   TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES OR
+   OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH
+   THE SOFTWARE OR ITS USE, INCLUDING ANY REVIEW RESULT OR CHANGE MADE BECAUSE OF ONE.
+
+8. Termination
+   On termination you must immediately stop using the Software and delete any copies in your
+   possession. Sections 1 and 3 to 9 survive termination.
+
+9. Governing law and venue
+   This license is governed by the laws of Denmark. Any dispute shall be settled by the Danish courts,
+   with the Licensor's local court as the court of first instance.
+
+Permissions beyond this license require prior written consent from the Licensor.

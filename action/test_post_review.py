@@ -1,0 +1,207 @@
+"""Tests for de rene funktioner i post_review og render.  python3 -m unittest -v"""
+import unittest
+import json
+import tempfile
+import contextlib
+import io
+from pathlib import Path
+from unittest.mock import patch
+
+import post_review as pr
+import render
+
+PATCH = """@@ -10,4 +10,5 @@ function a() {
+ const x = 1;
+-const y = 2;
++const y = 3;
++const z = 4;
+ return x;
+@@ -40,2 +41,2 @@
+-old
++new
+ tail"""
+
+
+class CommentableLines(unittest.TestCase):
+    def test_includes_added_and_context_lines_on_the_right_side(self):
+        lines = pr.commentable_lines([{"filename": "a.ts", "patch": PATCH}])["a.ts"]
+        self.assertEqual(lines, {10, 11, 12, 13, 41, 42})
+
+    def test_no_newline_marker_does_not_count_as_a_line(self):
+        patch = "@@ -1,2 +1,2 @@\n a\n-b\n+c\n\\ No newline at end of file"
+        self.assertEqual(pr.commentable_lines([{"filename": "x", "patch": patch}])["x"], {1, 2})
+
+    def test_file_without_patch_has_no_lines(self):
+        self.assertEqual(pr.commentable_lines([{"filename": "img.png"}])["img.png"], set())
+
+
+class Fingerprint(unittest.TestCase):
+    def test_same_path_and_title_ignoring_case_and_punctuation_match(self):
+        a = pr.fingerprint({"path": "a.ts", "title": "SQL-injection i søgning!"})
+        b = pr.fingerprint({"path": "a.ts", "title": "sql injection i søgning"})
+        self.assertEqual(a, b)
+
+    def test_different_path_gives_different_fingerprint(self):
+        a = pr.fingerprint({"path": "a.ts", "title": "x"})
+        self.assertNotEqual(a, pr.fingerprint({"path": "b.ts", "title": "x"}))
+
+
+class Validate(unittest.TestCase):
+    def test_scanner_gate_checks_commit_completion_and_test_failures(self):
+        with tempfile.NamedTemporaryFile(mode="w+") as fh:
+            base = {"head_sha": "sha", "complete": True, "notes": [], "failed_checks": []}
+            for updates, blocked in [({}, False), ({"head_sha": "old"}, True),
+                                     ({"complete": False}, True), ({"failed_checks": ["test"]}, True)]:
+                fh.seek(0); fh.truncate(); json.dump(dict(base, **updates), fh); fh.flush()
+                self.assertEqual(pr.scanner_gate(fh.name, "sha") is not None, blocked)
+        self.assertIsNotNone(pr.scanner_gate(None, "sha"))
+
+    def test_verdict_without_findings_cannot_approve(self):
+        with self.assertRaises(ValueError):
+            pr.validate({"verdict": "approve"})
+
+    def test_explicit_rejection_blocks_even_without_severe_findings(self):
+        self.assertTrue(pr.is_blocked({"verdict": "request_changes", "findings": []}))
+
+    def test_bad_check_shape_is_rejected(self):
+        with self.assertRaises(ValueError):
+            pr.validate({"verdict": "approve", "findings": [], "pre_merge_checks": "passed"})
+
+    def test_rejects_missing_verdict(self):
+        with self.assertRaises(ValueError):
+            pr.validate({"findings": []})
+
+    def test_rejects_unknown_severity(self):
+        with self.assertRaises(ValueError):
+            pr.validate({"verdict": "approve", "findings": [{"path": "a", "severity": "høj"}]})
+
+    def test_accepts_valid_result(self):
+        pr.validate({"verdict": "approve", "findings": [{"path": "a", "severity": "mindre"}]})
+
+
+class BuildReview(unittest.TestCase):
+    def test_resolved_comment_does_not_hide_a_reintroduced_bug(self):
+        old = {"id": 1, "user": {"login": "manilens[bot]"},
+               "body": "<!-- manilens:fp=abcdefabcdef -->"}
+        with patch.object(pr.gh, "paginate", return_value=[old]), \
+             patch.object(pr, "review_threads", return_value=[("thread", True, 1)]):
+            self.assertEqual(pr.open_bot_comments("o/r", 1, "manilens[bot]"), {})
+
+    def test_walkthrough_never_edits_someone_elses_marker(self):
+        other = {"id": 42, "user": {"login": "someone"}, "body": render.WALKTHROUGH_MARK}
+        with patch.object(pr.gh, "paginate", return_value=[other]), patch.object(pr.gh, "request") as api:
+            pr.upsert_walkthrough("o/r", 1, "new")
+        api.assert_called_once_with("POST", "/repos/o/r/issues/1/comments", {"body": "new"})
+
+    def test_stale_commit_is_rejected_before_posting(self):
+        with patch.object(pr.gh, "request", return_value={"state": "open", "head": {"sha": "new"}}):
+            with self.assertRaises(ValueError):
+                pr.require_current_head("o/r", 1, "old")
+
+    def test_finding_outside_diff_goes_to_review_body_and_known_fp_is_skipped(self):
+        known = {"path": "a.ts", "line": 11, "severity": "alvorlig", "title": "Kendt"}
+        result = {"findings": [
+            {"path": "a.ts", "line": 12, "severity": "alvorlig", "title": "Ny"},
+            {"path": "a.ts", "line": 99, "severity": "mindre", "title": "Udenfor"},
+            known,
+        ]}
+        allowed = pr.commentable_lines([{"filename": "a.ts", "patch": PATCH}])
+        inline, outside = pr.build_review(result, {pr.fingerprint(known): {"id": 1}}, allowed)
+        self.assertEqual([c["line"] for c in inline], [12])
+        self.assertEqual([f["title"] for f in outside], ["Udenfor"])
+
+
+class PostingFlow(unittest.TestCase):
+    def run_flow(self, checks, model_verdict="approve", description_error=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Path(tmp, "result.json")
+            result.write_text(json.dumps({"verdict": model_verdict, "findings": []}))
+            status = Path(tmp, "checks.json")
+            status.write_text(json.dumps(checks))
+            argv = ["post_review.py", "--repo", "o/r", "--pr", "1", "--head", "sha",
+                    "--result", str(result), "--checks", str(status)]
+            with patch("sys.argv", argv), patch.object(pr, "require_current_head"), \
+                 patch.object(pr, "open_bot_comments", return_value={}), \
+                 patch.object(pr.gh, "paginate", return_value=[]), patch.object(pr, "submit") as submit, \
+                 patch.object(pr, "upsert_walkthrough") as marker, \
+                 patch.object(pr, "update_description", side_effect=ValueError("write failed") if description_error else None), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                if description_error:
+                    with self.assertRaises(ValueError):
+                        pr.main()
+                    marker.assert_not_called()
+                    return
+                rc = pr.main()
+                return rc, submit.call_args.args[3], marker.call_args.args[2]
+
+    def test_failed_tests_override_model_approval(self):
+        rc, event, marker = self.run_flow({"head_sha": "sha", "complete": True,
+                                        "notes": [], "failed_checks": ["npm test"]})
+        self.assertEqual((rc, event), (1, "REQUEST_CHANGES"))
+        self.assertIn("verdict=request_changes", marker)
+
+    def test_only_complete_checks_allow_approval(self):
+        rc, event, marker = self.run_flow({"head_sha": "sha", "complete": True,
+                                        "notes": [], "failed_checks": []})
+        self.assertEqual((rc, event), (0, "APPROVE"))
+        self.assertIn("verdict=approve", marker)
+
+    def test_failed_write_cannot_publish_deploy_approval(self):
+        self.run_flow({"head_sha": "sha", "complete": True, "notes": [], "failed_checks": []},
+                      description_error=True)
+
+
+class Render(unittest.TestCase):
+    def test_model_text_cannot_inject_html_or_hidden_markers(self):
+        body = render.finding({"severity": "mindre", "title": "<img src=x onerror=1> Titel",
+                               "body": "ok <!-- manilens:fp=deadbeefdead --> <script>x</script>"}, "abcdefabcdef")
+        self.assertNotIn("<img", body)
+        self.assertNotIn("<script", body)
+        self.assertEqual(body.count("manilens:fp="), 1)
+
+    def test_suggestion_fence_is_longer_than_backticks_in_code(self):
+        body = render.finding({"severity": "mindre", "title": "t", "body": "b",
+                               "suggestion": "const s = ```x```;"}, "abcdefabcdef")
+        self.assertIn("````suggestion", body)
+        self.assertIn("<!-- manilens:fp=abcdefabcdef -->", body)
+
+    def test_merge_summary_replaces_existing_block_and_keeps_author_text(self):
+        first = render.merge_summary("Min beskrivelse", "**Tilføjet**\n- a")
+        second = render.merge_summary(first, "**Ændret**\n- b")
+        self.assertTrue(second.startswith("Min beskrivelse"))
+        self.assertEqual(second.count(render.SUMMARY_START), 1)
+        self.assertIn("- b", second)
+        self.assertNotIn("- a", second)
+
+    def test_walkthrough_renders_only_real_mermaid_sequence_diagrams(self):
+        good = render.walkthrough({"sequence_diagram": "sequenceDiagram\n  A->>B: hej"}, "s", False, 0)
+        bad = render.walkthrough({"sequence_diagram": "<script>alert(1)</script>"}, "s", False, 0)
+        self.assertIn("```mermaid", good)
+        self.assertNotIn("script", bad)
+
+    def test_walkthrough_links_only_a_valid_snapshot_url_in_snapshot_mode(self):
+        good = "https://manilens.mikkelmanniche.dk/r/" + "A" * 22
+        with patch.dict("os.environ", {"MANILENS_WORKSPACE_MODE": "snapshot"}):
+            self.assertIn(f"[Åbn review-oversigten]({good})", render.walkthrough({}, "s", False, 0, snapshot_url=good))
+            for bad in ("javascript:alert(1)", "https://evil.example/r/" + "A" * 22,
+                        "https://manilens.mikkelmanniche.dk/r/kort", good + ")](https://evil.example", None):
+                with self.subTest(url=bad):
+                    text = render.walkthrough({}, "s", False, 0, snapshot_url=bad)
+                    self.assertNotIn("Åbn review-oversigten", text)
+                    self.assertIn("Review-oversigten kunne ikke gemmes", text)
+                    self.assertNotIn("evil", text)
+
+    def test_walkthrough_keeps_artifact_link_in_legacy_mode(self):
+        env = {"MANILENS_REVIEW_BASE": "a" * 40, "GITHUB_RUN_ID": "42", "GITHUB_REPOSITORY": "o/r"}
+        with patch.dict("os.environ", env):
+            text = render.walkthrough({}, "s", False, 0)
+        self.assertIn("download manilens-workspace", text)
+        self.assertNotIn("Review-oversigten kunne ikke gemmes", text)
+
+    def test_walkthrough_has_machine_marker_for_deploy_script(self):
+        text = render.walkthrough({"summary": {}}, "abc123", True, 2)
+        self.assertIn("<!-- manilens sha=abc123 fund=2 verdict=request_changes -->", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,299 @@
+# ManiLens v2 — svar på @manilens og på svar i ManiLens' egne review-tråde.
+# Kaldes fra .github/workflows/manilens.yml (skabelon: templates/manilens-v2.yml), låst til fuld SHA.
+#
+# Tre job (M5: Claude-token og skrivetoken er aldrig i samme job):
+#   adgang  OIDC → token chat-context; lokale kommandoer (help, fix prompt, pause, resume) svares
+#           her uden model; ellers OIDC → /api/admit med tilstanden. Ingen PR-kode.
+#   model   Claude med kun læseadgang og uden id-token; skriver intet til GitHub
+#   svar    OIDC → token chat-post; poster svaret eller reviewet. Ingen PR-kode.
+# Motoren hentes altid fra mikkelmanniche-dk/manilens-action på den SHA, brokeren bekræfter.
+name: ManiLens chat
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: claude-opus-5
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+permissions: {}
+
+env:
+  CLAUDE_CODE_VERSION: 2.1.270
+  MANILENS_URL: https://manilens.mikkelmanniche.dk
+
+jobs:
+  adgang:
+    concurrency:
+      group: manilens-chat-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
+    if: >
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      github.event.comment.user.type != 'Bot' &&
+      (github.event.issue.pull_request || github.event.pull_request)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    outputs:
+      skip: ${{ steps.ctx.outputs.skip }}
+      mode: ${{ steps.ctx.outputs.mode }}
+      head: ${{ steps.ctx.outputs.head }}
+      base: ${{ steps.ctx.outputs.base }}
+      number: ${{ steps.ctx.outputs.number }}
+      engine_sha: ${{ steps.token.outputs.engine_sha }}
+    steps:
+      - name: Token til at læse og svare på PR'en
+        id: token
+        env:
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          OIDC="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
+          echo "::add-mask::$OIDC"
+          BODY="$(jq -nc --argjson pr "$PR" '{purpose: "chat-context", pr: $pr}')"
+          STATUS="$(curl -sS -o "$RUNNER_TEMP/token.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/token" \
+            -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
+          if [ "$STATUS" != "200" ]; then
+            MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/token.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
+            rm -f "$RUNNER_TEMP/token.json"
+            echo "::error::${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            exit 1
+          fi
+          TOKEN="$(jq -r '.data.token // empty' "$RUNNER_TEMP/token.json")"
+          SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/token.json")"
+          rm -f "$RUNNER_TEMP/token.json"
+          echo "::add-mask::$TOKEN"
+          if [ -z "$TOKEN" ] || ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Brokeren gav et ugyldigt svar."
+            exit 1
+          fi
+          echo "GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "engine_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Hent motoren på den bekræftede SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mikkelmanniche-dk/manilens-action
+          ref: ${{ steps.token.outputs.engine_sha }}
+          persist-credentials: false
+          path: manilens
+
+      - name: Saml konteksten og svar på lokale kommandoer
+        id: ctx
+        run: |
+          set +e
+          python3 manilens/action/chat.py context --no-finishing --event "$GITHUB_EVENT_PATH" --out "$RUNNER_TEMP/context.json"
+          code=$?
+          set -e
+          if [ $code -eq 3 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [ $code -eq 0 ] || exit $code
+          read_ctx() { python3 -c 'import json,os,sys; print(json.load(open(os.environ["RUNNER_TEMP"]+"/context.json"))[sys.argv[1]])' "$1"; }
+          if [ "$(read_ctx same_repo)" != "True" ]; then echo "PR fra en fork: ManiLens svarer ikke"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          MODE="$(read_ctx mode)"; HEAD="$(read_ctx head)"; BASE="$(read_ctx base)"; NUMBER="$(read_ctx number)"
+          [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] && [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] && [[ "$NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Ugyldig kontekst."; exit 1; }
+          case "$MODE" in chat|review|"full review") ;; *) echo "::error::Ukendt tilstand."; exit 1 ;; esac
+          { echo "skip=false"; echo "mode=$MODE"; echo "head=$HEAD"; echo "base=$BASE"; echo "number=$NUMBER"; } >> "$GITHUB_OUTPUT"
+
+      - name: Adgang hos ManiLens
+        if: steps.ctx.outputs.skip != 'true'
+        env:
+          PR: ${{ steps.ctx.outputs.number }}
+          MODE: ${{ steps.ctx.outputs.mode }}
+          TOKEN_SHA: ${{ steps.token.outputs.engine_sha }}
+        run: |
+          set -euo pipefail
+          OIDC="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
+          echo "::add-mask::$OIDC"
+          BODY="$(jq -nc --argjson pr "$PR" --arg mode "$MODE" '{purpose: "chat", pr: $pr, mode: $mode}')"
+          STATUS="$(curl -sS -o "$RUNNER_TEMP/admit.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/admit" \
+            -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
+          if [ "$STATUS" != "200" ]; then
+            MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/admit.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
+            MSG="${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            { echo "### ManiLens kører ikke"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$MSG"
+            exit 1
+          fi
+          SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/admit.json")"
+          if [ "$SHA" != "$TOKEN_SHA" ]; then
+            echo "::error::Motor-SHA fra admit matcher ikke token-kaldet."
+            exit 2
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.ctx.outputs.skip != 'true'
+        with:
+          name: manilens-chat-context
+          path: ${{ runner.temp }}/context.json
+          retention-days: 3
+
+  model:
+    needs: adgang
+    if: needs.adgang.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Hent motoren på den bekræftede SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mikkelmanniche-dk/manilens-action
+          ref: ${{ needs.adgang.outputs.engine_sha }}
+          persist-credentials: false
+          path: manilens
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: manilens-chat-context
+          path: ${{ runner.temp }}/ctx
+
+      - name: Hent PR'ens kode (køres ikke)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD: ${{ needs.adgang.outputs.head }}
+          BASE: ${{ needs.adgang.outputs.base }}
+          NR: ${{ needs.adgang.outputs.number }}
+        run: |
+          git init -q pr && cd pr
+          # Basen hentes også: projektregler og ignore-lister læses fra basen, aldrig fra PR'en.
+          git -c "http.extraheader=Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" \
+            fetch -q --depth 1 "https://github.com/${GITHUB_REPOSITORY}.git" "$HEAD" "$BASE"
+          git checkout -q "$HEAD"
+          rm -rf .claude/settings.json .claude/settings.local.json .claude/agents .claude/hooks .claude/skills .claude/commands .mcp.json CLAUDE.local.md
+          curl -sSfL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github.diff" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/$NR" > "$RUNNER_TEMP/diff.patch"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: ManiLens reviewer på kommando
+        if: needs.adgang.outputs.mode == 'review' || needs.adgang.outputs.mode == 'full review'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MANILENS_MODEL: ${{ inputs.model }}
+          MODE: ${{ needs.adgang.outputs.mode }}
+          NR: ${{ needs.adgang.outputs.number }}
+          BASE_SHA: ${{ needs.adgang.outputs.base }}
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" >/dev/null
+          IN="$RUNNER_TEMP"; mkdir -p "$IN/out"
+          curl -sSfL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/$NR" \
+            | python3 -c 'import json,sys; p=json.load(sys.stdin); json.dump({"repo":p["base"]["repo"]["full_name"],"number":p["number"],"title":p["title"],"body":p["body"] or ""}, sys.stdout, ensure_ascii=False)' > "$IN/meta.json"
+          if [ "$MODE" = "review" ]; then
+            (cd manilens/action && python3 collect_previous.py --repo "$GITHUB_REPOSITORY" --pr "$NR" --out "$IN/previous.json")
+          else
+            echo "[]" > "$IN/previous.json"
+          fi
+          printf '# Faste tjek\n(ikke kørt ved review på kommando)\n' > "$IN/tools.md"
+          # --context-base: regler, ignore-lister og CLAUDE.md fra PR-basen via knowledge.py (som i review.yml).
+          env -u GITHUB_TOKEN bash manilens/action/run_engine.sh --src pr --diff "$IN/diff.patch" --meta "$IN/meta.json" \
+            --tools "$IN/tools.md" --previous "$IN/previous.json" --context-base "$BASE_SHA" \
+            --out "$IN/out/result.json" --log "$IN/out/engine.log"
+
+      - name: ManiLens svarer (model)
+        if: needs.adgang.outputs.mode == 'chat'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" >/dev/null
+          mkdir -p "$RUNNER_TEMP/out"
+          PROMPT="$(python3 - <<'PY'
+          import os
+          t = open("manilens/engine/chat.md").read()
+          t = t.replace("{{CONTEXT}}", os.environ["RUNNER_TEMP"] + "/ctx/context.json")
+          t = t.replace("{{DIFF}}", os.environ["RUNNER_TEMP"] + "/diff.patch")
+          print(t)
+          PY
+          )"
+          CLEAN_HOME="$(mktemp -d)"
+          trap 'rm -rf "$CLEAN_HOME"' EXIT
+          WRAPPER="$PWD/manilens/action/claude_subscription.py"
+          (cd pr && HOME="$CLEAN_HOME" python3 "$WRAPPER" claude -p "$PROMPT" --model "$MODEL" --max-turns 10 --setting-sources user \
+            --strict-mcp-config --add-dir "$RUNNER_TEMP" \
+            --allowedTools "Read,Grep,Glob" \
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task" \
+            --output-format json) > "$RUNNER_TEMP/raw.json"
+          python3 -c '
+          import json, re, os
+          r = json.load(open(os.environ["RUNNER_TEMP"] + "/raw.json"))["result"]
+          json.dump(json.loads(re.search(r"\{.*\}", r, re.S).group(0)), open(os.environ["RUNNER_TEMP"] + "/out/reply.json", "w"))'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: manilens-chat-out
+          path: ${{ runner.temp }}/out/
+          retention-days: 3
+
+  svar:
+    needs: [adgang, model]
+    if: needs.adgang.outputs.skip != 'true' && needs.model.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - name: Token til at svare på PR'en
+        env:
+          PR: ${{ needs.adgang.outputs.number }}
+          ADMITTED_SHA: ${{ needs.adgang.outputs.engine_sha }}
+        run: |
+          set -euo pipefail
+          OIDC="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
+          echo "::add-mask::$OIDC"
+          BODY="$(jq -nc --argjson pr "$PR" '{purpose: "chat-post", pr: $pr}')"
+          STATUS="$(curl -sS -o "$RUNNER_TEMP/token.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/token" \
+            -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
+          if [ "$STATUS" != "200" ]; then
+            MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/token.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
+            rm -f "$RUNNER_TEMP/token.json"
+            echo "::error::${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            exit 1
+          fi
+          TOKEN="$(jq -r '.data.token // empty' "$RUNNER_TEMP/token.json")"
+          SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/token.json")"
+          rm -f "$RUNNER_TEMP/token.json"
+          echo "::add-mask::$TOKEN"
+          if [ -z "$TOKEN" ] || [ "$SHA" != "$ADMITTED_SHA" ]; then
+            echo "::error::Motor-SHA fra token-kaldet matcher ikke den godkendte."
+            exit 2
+          fi
+          echo "GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Hent motoren på den bekræftede SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mikkelmanniche-dk/manilens-action
+          ref: ${{ needs.adgang.outputs.engine_sha }}
+          persist-credentials: false
+          path: manilens
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: manilens-chat-out
+          path: ${{ runner.temp }}/out
+
+      - name: Post svaret
+        env:
+          MODE: ${{ needs.adgang.outputs.mode }}
+          NR: ${{ needs.adgang.outputs.number }}
+          HEAD: ${{ needs.adgang.outputs.head }}
+        run: |
+          cd manilens/action
+          if [ "$MODE" = "chat" ]; then
+            python3 chat.py reply --event "$GITHUB_EVENT_PATH" --result "$RUNNER_TEMP/out/reply.json"
+          else
+            # Uden --checks kan et review på kommando aldrig godkende PR'en.
+            python3 post_review.py --repo "$GITHUB_REPOSITORY" --pr "$NR" --head "$HEAD" --result "$RUNNER_TEMP/out/result.json"
+          fi
