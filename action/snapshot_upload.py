@@ -131,6 +131,10 @@ def read_counts(path):
     return data if isinstance(data, list) else []
 
 
+# Simplys WAF giver 455 til Pythons standard-User-Agent (målt fra en GitHub-runner 17/9); samme som workflowenes MANILENS_UA.
+USER_AGENT = "ManiLens-Action/2.0 (+https://github.com/mikkelmanniche-dk/manilens-action)"
+
+
 def oidc_token(audience):
     url, request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL"), os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not url or not request_token:
@@ -148,7 +152,7 @@ def oidc_token(audience):
 def upload(base, token, pr, head, encoded):
     body = json.dumps({"pr": pr, "head_sha": head, "encoding": "gzip+base64", "data": encoded}).encode()
     req = urllib.request.Request(base + "/api/snapshot", data=body, method="POST",
-                                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+                                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
             data = json.load(res)

@@ -95,6 +95,8 @@ class SnapshotUpload(unittest.TestCase):
         post = Fake.calls[1]
         self.assertEqual((post[0], post[1]), ('POST', '/api/snapshot'))
         self.assertTrue(post[2]['Authorization'].startswith('Bearer eyJ'))
+        self.assertEqual(post[2]['User-Agent'], 'ManiLens-Action/2.0 (+https://github.com/mikkelmanniche-dk/manilens-action)',
+                         'Simplys WAF afviser Pythons standard-User-Agent (455, målt 17/9)')
         body = post[3]
         self.assertEqual((body['pr'], body['head_sha'], body['encoding']), (12, HEAD, 'gzip+base64'))
         sent = json.loads(gzip.decompress(base64.b64decode(body['data'])))
