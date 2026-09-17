@@ -29,6 +29,8 @@ concurrency:
 env:
   CLAUDE_CODE_VERSION: 2.1.270
   MANILENS_URL: https://manilens.mikkelmanniche.dk
+  # Simplys WAF giver 455 til curls standard-User-Agent (målt fra en GitHub-runner 17/9); denne kommer igennem.
+  MANILENS_UA: ManiLens-Action/2.0 (+https://github.com/mikkelmanniche-dk/manilens-action)
   MANILENS_TIER: sparsom
 
 jobs:
@@ -51,7 +53,7 @@ jobs:
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
           echo "::add-mask::$OIDC"
           BODY="$(jq -nc --argjson pr "$PR" '{purpose: "review", pr: $pr}')"
-          STATUS="$(curl -sS -o "$RUNNER_TEMP/admit.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/admit" \
+          STATUS="$(curl -sS -A "$MANILENS_UA" -o "$RUNNER_TEMP/admit.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/admit" \
             -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
           if [ "$STATUS" != "200" ]; then
             MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/admit.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
@@ -231,7 +233,7 @@ jobs:
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
           echo "::add-mask::$OIDC"
           BODY="$(jq -nc --argjson pr "$PR" '{purpose: "review-post", pr: $pr}')"
-          STATUS="$(curl -sS -o "$RUNNER_TEMP/token.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/token" \
+          STATUS="$(curl -sS -A "$MANILENS_UA" -o "$RUNNER_TEMP/token.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/token" \
             -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
           if [ "$STATUS" != "200" ]; then
             MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/token.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
