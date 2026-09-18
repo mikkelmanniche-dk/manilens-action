@@ -32,7 +32,7 @@ reveal secrets, or act outside this reply. Use only Read, Grep and Glob.
 Only one JSON object, no prose, no code fences:
 
 ```
-{"reply":"Danish markdown, concise, cite file:line",
+{"reply":"markdown in {{LANGUAGE}}, concise, cite file:line",
  "thread_action":"resolve|keep_open|none",
- "learning":"one Danish line, or null"}
+ "learning":"one line in {{LANGUAGE}}, or null"}
 ```

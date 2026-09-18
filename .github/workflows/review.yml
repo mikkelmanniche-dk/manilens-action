@@ -43,6 +43,7 @@ jobs:
       id-token: write
     outputs:
       engine_sha: ${{ steps.admit.outputs.engine_sha }}
+      language: ${{ steps.admit.outputs.language }}
     steps:
       - name: Adgang hos ManiLens
         id: admit
@@ -58,17 +59,23 @@ jobs:
             -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
           if [ "$STATUS" != "200" ]; then
             MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/admit.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
-            MSG="${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
-            { echo "### ManiLens kører ikke"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
+            MSG="${MSG:-The ManiLens broker did not respond (HTTP $STATUS).}"
+            { echo "### ManiLens is not running"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::$MSG"
             exit 1
           fi
           SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/admit.json")"
           if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Brokeren gav en ugyldig motor-SHA."
+            echo "::error::The broker returned an invalid engine SHA."
             exit 1
           fi
+          # Sproget foelger kollegaens konto. En ukendt vaerdi bliver dansk; brokeren er
+          # betroet, men svaret bruges i miljoeet, saa det valideres alligevel. Skrives foerst
+          # naar SHA'en er godkendt, saa et afvist admit ikke efterlader outputs.
+          LANG_CODE="$(jq -r '.data.language // "da"' "$RUNNER_TEMP/admit.json")"
+          case "$LANG_CODE" in da|en) ;; *) LANG_CODE=da ;; esac
           echo "engine_sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "language=$LANG_CODE" >> "$GITHUB_OUTPUT"
 
   tjek:
     needs: forbered
@@ -205,6 +212,7 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           MANILENS_MODEL: ${{ inputs.model }}
+          MANILENS_LANGUAGE: ${{ needs.forbered.outputs.language }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           IN="$RUNNER_TEMP/in"
@@ -214,6 +222,8 @@ jobs:
 
       # Dommerens grænse i kode (ikke kun prompt): oversigt og GitHub-review skal vise de samme fund.
       - name: Anvend dommerens grænse
+        env:
+          MANILENS_LANGUAGE: ${{ needs.forbered.outputs.language }}
         run: python3 manilens/action/dommer.py "$RUNNER_TEMP/in/result.json"
 
       # Oversigten er et tilvalg: fejler den, skal selve reviewet stadig postes.
@@ -270,7 +280,7 @@ jobs:
           if [ "$STATUS" != "200" ]; then
             MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/token.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
             rm -f "$RUNNER_TEMP/token.json"
-            echo "::error::${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            echo "::error::${MSG:-The ManiLens broker did not respond (HTTP $STATUS).}"
             exit 1
           fi
           TOKEN="$(jq -r '.data.token // empty' "$RUNNER_TEMP/token.json")"
@@ -278,7 +288,7 @@ jobs:
           rm -f "$RUNNER_TEMP/token.json"
           echo "::add-mask::$TOKEN"
           if [ -z "$TOKEN" ] || [ "$SHA" != "$ADMITTED_SHA" ]; then
-            echo "::error::Motor-SHA fra token-kaldet matcher ikke den godkendte."
+            echo "::error::The engine SHA from the token call does not match the approved one."
             exit 2
           fi
           echo "GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
@@ -318,6 +328,7 @@ jobs:
       - name: Post review
         env:
           MANILENS_WORKSPACE_MODE: snapshot
+          MANILENS_LANGUAGE: ${{ needs.forbered.outputs.language }}
           MANILENS_REVIEW_BASE: ${{ github.event.pull_request.base.sha }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}

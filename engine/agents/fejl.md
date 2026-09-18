@@ -46,7 +46,7 @@ Return a JSON array (no prose) of candidates:
 
 ```
 [{"path":"…","line":0,"start_line":null,"quote":"exact code","severity":"kritisk|alvorlig|mindre",
-  "category":"…","title":"Danish","body":"Danish","scenario":"Danish","suggestion":"code or null",
+  "category":"…","title":"review language","body":"review language","scenario":"review language","suggestion":"code or null",
   "agent_prompt":"English fix instruction"}]
 ```
 Return `[]` if you find nothing that meets the bar.

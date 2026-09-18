@@ -46,7 +46,7 @@ Return a JSON array (no prose), same shape as the correctness reviewer:
 
 ```
 [{"path":"…","line":0,"start_line":null,"quote":"exact code","severity":"kritisk|alvorlig|mindre",
-  "category":"Sikkerhed|Privatliv","title":"Danish","body":"Danish","scenario":"Danish attack path",
+  "category":"Sikkerhed|Privatliv","title":"review language","body":"review language","scenario":"attack path in the review language",
   "suggestion":"code or null","agent_prompt":"English fix instruction"}]
 ```
 Return `[]` if nothing meets the bar.

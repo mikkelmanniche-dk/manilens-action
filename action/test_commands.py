@@ -33,7 +33,7 @@ class Commands(unittest.TestCase):
         # Det offentlige repo har ikke finishing.py (M6/M7).
         with tempfile.TemporaryDirectory() as tmp:
             for name in ('chat.py', 'commands.py', 'github_api.py', 'render.py', 'post_review.py',
-                         'filter_diff.py', 'knowledge.py', 'scan_report.py', 'dommer.py'):
+                         'filter_diff.py', 'knowledge.py', 'scan_report.py', 'dommer.py', 'tekster.py'):
                 if (HERE / name).exists():
                     (Path(tmp) / name).write_text((HERE / name).read_text())
             result = subprocess.run([sys.executable, '-c', 'import chat, post_review, render'], cwd=tmp,
