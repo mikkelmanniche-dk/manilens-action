@@ -9,13 +9,9 @@ import os
 import re
 
 import github_api as gh
-from post_review import FP_RE, review_threads
+from post_review import FP_RE, open_finding_ids, review_threads
 
 TITLE_RE = re.compile(r"\*\*(.+?)\*\*")
-
-
-def unresolved_comment_ids(repo, pr):
-    return {first_id for _, resolved, first_id in review_threads(repo, pr) if not resolved}
 
 
 def main():
@@ -26,9 +22,10 @@ def main():
     ap.add_argument("--bot", default=os.environ.get("MANILENS_BOT", "manilens[bot]"))
     args = ap.parse_args()
 
-    open_ids = unresolved_comment_ids(args.repo, args.pr)
+    comments = gh.paginate(f"/repos/{args.repo}/pulls/{args.pr}/comments")
+    open_ids = open_finding_ids(comments, review_threads(args.repo, args.pr), args.bot)
     previous = []
-    for c in gh.paginate(f"/repos/{args.repo}/pulls/{args.pr}/comments"):
+    for c in comments:
         fp = FP_RE.search(c["body"])
         if c["user"]["login"] != args.bot or not fp or c["id"] not in open_ids:
             continue

@@ -79,6 +79,65 @@ class Validate(unittest.TestCase):
         pr.validate({"verdict": "approve", "findings": [{"path": "a", "severity": "mindre"}]})
 
 
+class ConfidenceGate(unittest.TestCase):
+    def test_finding_below_min_confidence_moves_to_rejected(self):
+        result = {"verdict": "request_changes", "findings": [
+            {"path": "a.py", "line": 1, "severity": "alvorlig", "title": "Fejl", "confidence": 75}]}
+        pr.filter_confidence(result)
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(len(result["rejected"]), 1)
+        self.assertIn("75", result["rejected"][0]["reason"])
+        self.assertIn(str(pr.MIN_CONFIDENCE), result["rejected"][0]["reason"])
+
+    def test_finding_at_exactly_min_confidence_is_kept(self):
+        result = {"verdict": "request_changes", "findings": [
+            {"path": "a.py", "line": 1, "severity": "alvorlig", "title": "Fejl", "confidence": 80}]}
+        pr.filter_confidence(result)
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertNotIn("rejected", result)
+
+    def test_finding_without_confidence_is_rejected(self):
+        result = {"verdict": "request_changes", "findings": [
+            {"path": "a.py", "line": 1, "severity": "alvorlig", "title": "Fejl"}]}
+        pr.filter_confidence(result)
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(len(result["rejected"]), 1)
+
+    def test_non_numeric_confidence_is_rejected(self):
+        result = {"verdict": "request_changes", "findings": [
+            {"path": "a.py", "line": 1, "severity": "alvorlig", "title": "Fejl", "confidence": "høj"}]}
+        pr.filter_confidence(result)
+        self.assertEqual(result["findings"], [])
+
+    def test_existing_rejected_entries_are_kept_alongside_new_ones(self):
+        result = {"verdict": "approve", "findings": [
+            {"path": "a.py", "line": 1, "severity": "mindre", "title": "Fejl", "confidence": 50}],
+            "rejected": [{"path": "b.py", "line": 2, "title": "Andet", "reason": "duplikat"}]}
+        pr.filter_confidence(result)
+        self.assertEqual(len(result["rejected"]), 2)
+
+
+class RecomputeVerdict(unittest.TestCase):
+    def test_verdict_flips_to_approve_when_only_blocker_was_below_confidence(self):
+        result = {"verdict": "request_changes", "findings": [], "pre_merge_checks": []}
+        self.assertEqual(pr.recompute_verdict(result), "approve")
+
+    def test_verdict_stays_request_changes_for_confirmed_blocking_finding(self):
+        result = {"verdict": "approve", "findings": [
+            {"path": "a.py", "severity": "kritisk", "title": "x", "confidence": 95}], "pre_merge_checks": []}
+        self.assertEqual(pr.recompute_verdict(result), "request_changes")
+
+    def test_verdict_stays_request_changes_for_failed_error_check(self):
+        result = {"verdict": "approve", "findings": [], "pre_merge_checks": [
+            {"name": "Tests", "mode": "error", "status": "fail"}]}
+        self.assertEqual(pr.recompute_verdict(result), "request_changes")
+
+    def test_minor_findings_alone_never_block(self):
+        result = {"verdict": "request_changes", "findings": [
+            {"path": "a.py", "severity": "mindre", "title": "x", "confidence": 95}], "pre_merge_checks": []}
+        self.assertEqual(pr.recompute_verdict(result), "approve")
+
+
 class BuildReview(unittest.TestCase):
     def test_resolved_comment_does_not_hide_a_reintroduced_bug(self):
         old = {"id": 1, "user": {"login": "manilens[bot]"},
@@ -111,11 +170,91 @@ class BuildReview(unittest.TestCase):
         self.assertEqual([f["title"] for f in outside], ["Udenfor"])
 
 
-class PostingFlow(unittest.TestCase):
-    def run_flow(self, checks, model_verdict="approve", description_error=False):
+BOT = "manilens[bot]"
+
+
+def root(cid, fp="abcdefabcdef"):
+    return {"id": cid, "user": {"login": BOT, "type": "Bot"}, "body": f"**Fund** <!-- manilens:fp={fp} -->", "path": "a.py", "line": 3}
+
+
+def reply(cid, to, login=BOT, body=None):
+    return {"id": cid, "in_reply_to_id": to, "user": {"login": login, "type": "Bot" if login == BOT else "User"},
+            "body": body if body is not None else f"✅ Rettet i commit abc1234.\n\n{pr.CLOSED_MARK}"}
+
+
+class ClosedThreads(unittest.TestCase):
+    """Mulighed A (17/9): ManiLens løser ikke tråde (kræver contents: write). Et fund lukkes med botsvarets markør."""
+
+    def open_fps(self, comments, threads):
+        with patch.object(pr.gh, "paginate", return_value=comments), patch.object(pr, "review_threads", return_value=threads):
+            return set(pr.open_bot_comments("o/r", 1, BOT))
+
+    def test_bot_reply_with_closed_mark_closes_the_finding(self):
+        self.assertEqual(self.open_fps([root(1), reply(2, 1)], [("t", False, 1)]), set())
+
+    def test_closed_mark_from_someone_else_never_closes_a_finding(self):
+        self.assertEqual(self.open_fps([root(1), reply(2, 1, login="kollega")], [("t", False, 1)]), {"abcdefabcdef"})
+
+    def test_closed_mark_in_another_thread_does_not_close_this_finding(self):
+        comments = [root(1), root(5, fp="123456123456"), reply(2, 5)]
+        self.assertEqual(self.open_fps(comments, [("t", False, 1), ("u", False, 5)]), {"abcdefabcdef"})
+
+    def test_closed_mark_needs_a_bot_account_not_just_the_login(self):
+        spoof = reply(2, 1)
+        spoof["user"]["type"] = "User"
+        self.assertEqual(self.open_fps([root(1), spoof], [("t", False, 1)]), {"abcdefabcdef"})
+
+    def test_bot_reply_without_mark_keeps_the_finding_open(self):
+        self.assertEqual(self.open_fps([root(1), reply(2, 1, body="Svar uden markør")], [("t", False, 1)]), {"abcdefabcdef"})
+
+    def test_fixed_finding_gets_reply_with_mark_and_thread_is_not_resolved(self):
+        result = {"previous": [{"fp": "abcdefabcdef", "status": "rettet", "reason": "Parameter bruges nu."}]}
+        with patch.object(pr.gh, "request") as api, patch.object(pr.gh, "graphql") as graphql:
+            fixed = pr.close_fixed("o/r", 1, "abc1234def", result, {"abcdefabcdef": root(1)})
+        self.assertEqual(fixed, {"abcdefabcdef"})
+        graphql.assert_not_called()
+        method, url, body = api.call_args.args
+        self.assertEqual((method, url), ("POST", "/repos/o/r/pulls/1/comments/1/replies"))
+        self.assertIn("✅ Rettet i commit abc1234", body["body"])
+        self.assertIn(pr.CLOSED_MARK, body["body"])
+
+    def test_one_failed_reply_does_not_stop_the_others(self):
+        result = {"previous": [{"fp": "aaaaaaaaaaaa", "status": "rettet"}, {"fp": "bbbbbbbbbbbb", "status": "rettet"}]}
+        existing = {"aaaaaaaaaaaa": root(1, "aaaaaaaaaaaa"), "bbbbbbbbbbbb": root(2, "bbbbbbbbbbbb")}
+        out = io.StringIO()
+        with patch.object(pr.gh, "request", side_effect=[pr.gh.GitHubError("HTTP 403"), {}]) as api, contextlib.redirect_stdout(out):
+            fixed = pr.close_fixed("o/r", 1, "abc1234", result, existing)
+        self.assertEqual(api.call_count, 2)
+        self.assertEqual(fixed, {"bbbbbbbbbbbb"})
+        self.assertIn("::warning::", out.getvalue())
+
+    def test_fixed_finding_whose_reply_failed_still_blocks_merge(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = Path(tmp, "result.json")
-            result.write_text(json.dumps({"verdict": model_verdict, "findings": []}))
+            result.write_text(json.dumps({"verdict": "approve", "findings": [],
+                                          "previous": [{"fp": "abcdefabcdef", "status": "rettet"}]}))
+            status = Path(tmp, "checks.json")
+            status.write_text(json.dumps({"head_sha": "sha", "complete": True, "notes": [], "failed_checks": []}))
+            argv = ["post_review.py", "--repo", "o/r", "--pr", "1", "--head", "sha", "--result", str(result), "--checks", str(status)]
+            with patch("sys.argv", argv), patch.object(pr, "require_current_head"), \
+                    patch.object(pr, "open_bot_comments", return_value={"abcdefabcdef": root(1)}), \
+                    patch.object(pr.gh, "request", side_effect=pr.gh.GitHubError("HTTP 502")), \
+                    patch.object(pr.gh, "paginate", return_value=[]), patch.object(pr, "submit") as submit, \
+                    patch.object(pr, "update_description"), patch.object(pr, "upsert_walkthrough"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                rc = pr.main()
+        self.assertEqual((rc, submit.call_args.args[3]), (1, "REQUEST_CHANGES"))
+
+    def test_engine_never_calls_resolve_review_thread(self):
+        here = Path(__file__).parent
+        users = [f.name for f in here.glob("*.py") if not f.name.startswith("test_") and "resolveReviewThread(" in f.read_text()]
+        self.assertEqual(users, [])
+
+class PostingFlow(unittest.TestCase):
+    def run_flow(self, checks, model_verdict="approve", description_error=False, findings=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Path(tmp, "result.json")
+            result.write_text(json.dumps({"verdict": model_verdict, "findings": findings or []}))
             status = Path(tmp, "checks.json")
             status.write_text(json.dumps(checks))
             argv = ["post_review.py", "--repo", "o/r", "--pr", "1", "--head", "sha",
@@ -149,6 +288,22 @@ class PostingFlow(unittest.TestCase):
     def test_failed_write_cannot_publish_deploy_approval(self):
         self.run_flow({"head_sha": "sha", "complete": True, "notes": [], "failed_checks": []},
                       description_error=True)
+
+    def test_finding_below_confidence_no_longer_blocks_merge(self):
+        rc, event, marker = self.run_flow(
+            {"head_sha": "sha", "complete": True, "notes": [], "failed_checks": []},
+            model_verdict="request_changes",
+            findings=[{"path": "a.py", "line": 1, "severity": "alvorlig", "title": "Fejl", "confidence": 75}])
+        self.assertEqual((rc, event), (0, "APPROVE"))
+        self.assertIn("verdict=approve", marker)
+
+    def test_finding_at_min_confidence_still_blocks_merge(self):
+        rc, event, marker = self.run_flow(
+            {"head_sha": "sha", "complete": True, "notes": [], "failed_checks": []},
+            model_verdict="request_changes",
+            findings=[{"path": "a.py", "line": 1, "severity": "alvorlig", "title": "Fejl", "confidence": 80}])
+        self.assertEqual((rc, event), (1, "REQUEST_CHANGES"))
+        self.assertIn("verdict=request_changes", marker)
 
 
 class Render(unittest.TestCase):

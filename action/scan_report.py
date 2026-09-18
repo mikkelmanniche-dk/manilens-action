@@ -8,6 +8,7 @@ saarbarheder kun hvis de er nye i forhold til base. Hver scanner har sin egen
 parser; en scanner der mangler eller fejler, springes over med en note.
 """
 import argparse
+import codecs
 import glob
 import json
 import os
@@ -19,12 +20,20 @@ MAX_LOG_LINES = 60
 MAX_COUNT_ROWS = 100  # samme loft som brokerens scanner_counts
 
 
+def diff_path(raw):
+    """Stien efter "+++ ": git citerer stier med æ/ø/å (C-escapes) og sætter en tabulator efter stier med mellemrum."""
+    raw = raw.rstrip("\t")
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        raw = codecs.escape_decode(raw[1:-1].encode("utf-8"))[0].decode("utf-8", "replace")
+    return raw[2:] if raw.startswith("b/") else None
+
+
 def changed_lines(diff):
     """{sti: set(linjenumre i HEAD)} for tilfoejede linjer."""
     result, path, line = {}, None, 0
     for row in diff.splitlines():
         if row.startswith("+++ "):
-            path = row[6:] if row.startswith("+++ b/") else None
+            path = diff_path(row[4:])
             if path:
                 result.setdefault(path, set())
         elif row.startswith("@@"):
@@ -71,10 +80,13 @@ def _rel(path):
     return real
 
 
-def parse_semgrep(data):
+OPENGREP_PREFIX = re.compile(r"^(?:.*\.)?opengrep-rules(?:-[0-9a-f]{40})?\.")
+
+
+def parse_opengrep(data):
     for r in (data or {}).get("results", []):
         sev = r.get("extra", {}).get("severity", "INFO")
-        yield {"tool": "semgrep", "rule": r.get("check_id", ""), "severity": sev.lower(),
+        yield {"tool": "opengrep", "rule": OPENGREP_PREFIX.sub("", r.get("check_id", "")), "severity": sev.lower(),
                "path": _rel(r.get("path")), "line": r.get("start", {}).get("line"),
                "message": r.get("extra", {}).get("message", "")}
 
@@ -156,6 +168,43 @@ def parse_tsc(text, root):
                "path": _rel(m.group(1)), "line": int(m.group(2)), "message": m.group(4)}
 
 
+def parse_zizmor(data):
+    for f in data or []:
+        if f.get("ignored"):
+            continue
+        for loc in f.get("locations", []):
+            symbolic = loc.get("symbolic") or {}
+            if symbolic.get("kind") != "Primary":
+                continue
+            row = ((loc.get("concrete") or {}).get("location") or {}).get("start_point", {}).get("row")
+            yield {"tool": "zizmor", "rule": f.get("ident", ""),
+                   "severity": str((f.get("determinations") or {}).get("severity", "")).lower(),
+                   "path": _rel(((symbolic.get("key") or {}).get("Local") or {}).get("verbatim_path")),
+                   "line": row + 1 if isinstance(row, int) else None,
+                   "message": ": ".join(filter(None, [f.get("desc"), symbolic.get("annotation")]))}
+
+
+def parse_oxlint(data):
+    for d in (data or {}).get("diagnostics", []):
+        labels = d.get("labels") or [{}]
+        yield {"tool": "oxlint", "rule": d.get("code") or "parse-error", "severity": d.get("severity", "warning"),
+               "path": _rel(d.get("filename")), "line": (labels[0].get("span") or {}).get("line"),
+               "message": " — ".join(filter(None, [d.get("message"), d.get("help")]))}
+
+
+GOLANGCI_TYPECHECK = "golangci-lint: Go-koden kompilerer ikke, så Go-tjekkene er ufuldstændige"
+
+
+def parse_golangci(data):
+    # typecheck betyder, at koden ikke kompilerer; positionen er upålidelig, så det bliver en note (collect).
+    for i in (data or {}).get("Issues") or []:
+        if i.get("FromLinter") == "typecheck":
+            continue
+        pos = i.get("Pos") or {}
+        yield {"tool": "golangci-lint", "rule": i.get("FromLinter", ""), "severity": (i.get("Severity") or "warning").lower(),
+               "path": _rel(pos.get("Filename")), "line": pos.get("Line"), "message": i.get("Text", "")}
+
+
 def osv_ids(data):
     """{(pakke, version, id): (kilde, resume)} fra osv-scanner JSON."""
     found = {}
@@ -168,20 +217,22 @@ def osv_ids(data):
     return found
 
 
-PARSERS = {"semgrep": parse_semgrep, "ruff": parse_ruff, "shellcheck": parse_shellcheck,
+PARSERS = {"opengrep": parse_opengrep, "ruff": parse_ruff, "shellcheck": parse_shellcheck,
            "actionlint": parse_actionlint, "hadolint": parse_hadolint, "phpstan": parse_phpstan,
            "squawk": parse_squawk, "trivy": parse_trivy, "htmlvalidate": parse_htmlvalidate,
-           "stylelint": parse_stylelint, "denolint": parse_denolint}
-PARSER_TYPES = {"semgrep": dict, "ruff": list, "shellcheck": (dict, list),
+           "stylelint": parse_stylelint, "denolint": parse_denolint,
+           "zizmor": parse_zizmor, "oxlint": parse_oxlint, "golangci": parse_golangci}
+PARSER_TYPES = {"opengrep": dict, "ruff": list, "shellcheck": (dict, list),
                 "actionlint": list, "hadolint": list, "phpstan": dict,
                 "squawk": list, "trivy": dict, "htmlvalidate": list,
-                "stylelint": list, "denolint": dict}
+                "stylelint": list, "denolint": dict,
+                "zizmor": list, "oxlint": dict, "golangci": dict}
 
 
 def blocking_errors(errors):
     """Scanner errors that make coverage incomplete.
 
-    Semgrep marks recoverable problems, such as a bash snippet in YAML it cannot
+    Opengrep (like Semgrep) marks recoverable problems, such as a bash snippet in YAML it cannot
     parse, as level "warn"; the file is still scanned. Anything else counts.
     """
     if not errors:
@@ -207,6 +258,9 @@ def collect(raw_dir, changed):
                 continue
             if isinstance(data, dict) and blocking_errors(data.get("errors")):
                 notes.append(f"{tool}: scanneren rapporterede fejl; dækningen er ufuldstændig")
+            if tool == "golangci" and isinstance(data, dict) and any(
+                    isinstance(i, dict) and i.get("FromLinter") == "typecheck" for i in data.get("Issues") or []):
+                notes.append(GOLANGCI_TYPECHECK)
             try:
                 findings += [x for x in parser(data) if near_change(x, changed)]
             except (TypeError, ValueError, KeyError, AttributeError):
@@ -265,10 +319,12 @@ def grouped(findings):
     return list(groups.values())
 
 
-def render(findings, notes, logs_dir):
+def render(findings, notes, logs_dir, languages=None):
     lines = ["# Faste tjek og scannere (kørt uden hemmeligheder)", "",
              "Kun fund i PR'ens ændrede linjer er medtaget. Scannere tager fejl: brug fundene",
              "som spor, verificér mod koden, og rapportér kun det, der holder.", ""]
+    if languages is not None:
+        lines += [f"Sprog i PR'en: {languages or 'ingen genkendte'}", ""]
     if findings:
         lines += [f"## Scannerfund ({len(findings)} i {len(grouped(findings))} grupper)", ""]
         for group in grouped(findings)[:MAX_FINDINGS]:
@@ -303,6 +359,7 @@ def main():
     ap.add_argument("--root", help="repoets rod (standard: nuvaerende mappe)")
     ap.add_argument("--head", default="")
     ap.add_argument("--notes")
+    ap.add_argument("--languages", help="fil med sprogene fra sprog.py")
     args = ap.parse_args()
     global REPO_ROOT
     if args.root:
@@ -313,8 +370,12 @@ def main():
     if args.notes and os.path.exists(args.notes):
         with open(args.notes, errors="replace") as fh:
             notes.extend(line.strip() for line in fh if line.strip())
+    languages = None
+    if args.languages and os.path.exists(args.languages):
+        with open(args.languages, errors="replace") as fh:
+            languages = fh.read().strip()
     with open(args.out, "w") as fh:
-        fh.write(render(findings, notes, args.logs))
+        fh.write(render(findings, notes, args.logs, languages))
     with open(args.out + ".status.json", "w") as fh:
         json.dump(check_status(args.logs, notes, args.head), fh, ensure_ascii=False, indent=2)
     with open(args.out + ".counts.json", "w") as fh:

@@ -16,7 +16,7 @@ import sys
 import github_api as gh
 import render
 from commands import parse_command
-from post_review import FP_RE, resolve_thread, review_threads
+from post_review import CLOSED_MARK, FP_RE, is_minor_finding_comment, open_finding_ids, review_threads
 
 TRUSTED = ("OWNER", "MEMBER", "COLLABORATOR")
 WRITE_PERMISSIONS = ("admin", "maintain", "write")
@@ -49,9 +49,10 @@ uklare eller ikke understøttede konflikter stopper uden at ændre branchen.
 
 
 def open_fix_prompt(repo, number):
-    open_ids = {first for _, resolved, first in review_threads(repo, number) if not resolved}
+    comments = gh.paginate(f"/repos/{repo}/pulls/{number}/comments")
+    open_ids = open_finding_ids(comments, review_threads(repo, number), BOT)
     findings = []
-    for c in gh.paginate(f"/repos/{repo}/pulls/{number}/comments"):
+    for c in comments:
         user = c.get("user") or {}
         if (c["id"] not in open_ids or user.get("login") != BOT
                 or user.get("type") != "Bot" or not FP_RE.search(c.get("body", ""))):
@@ -169,10 +170,15 @@ def cmd_reply(args):
         reply += f"\n\n📝 Forslag til `.manilens/laering.md`: {result['learning']}"
     thread = thread_for(repo, number, comment) if "pull_request" in event else None
     if thread:
+        # "resolve" lukker fundet med markøren; tråden løses ikke (kræver contents: write). Et blokerende fund lukkes
+        # aldrig fra chat (prompt-injektion i tråden må ikke kunne fjerne en blokering) — kun et nyt review lukker det.
+        if result.get("thread_action") == "resolve":
+            if is_minor_finding_comment(thread["finding"]):
+                reply += f"\n\n{CLOSED_MARK}"
+            else:
+                reply += "\n\n_Fundet er blokerende og lukkes først, når et nyt review bekræfter rettelsen._"
         gh.request("POST", f"/repos/{repo}/pulls/{number}/comments/{thread['root_id']}/replies",
                    {"body": reply})
-        if result.get("thread_action") == "resolve":
-            resolve_thread(repo, number, thread["root_id"])
     else:
         gh.request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": reply})
     print(f"svar postet ({result.get('thread_action', 'none')})")

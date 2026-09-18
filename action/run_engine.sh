@@ -3,7 +3,7 @@
 # Bruges baade af testbanen (bench/run.sh) og af GitHub-workflowen.
 #
 #   run_engine.sh --src DIR --diff FIL --meta FIL --out FIL \
-#                 [--tools FIL] [--previous FIL] [--rules FIL]... [--log FIL]
+#                 [--tools FIL] [--graph FIL] [--context FIL] [--history FIL] [--previous FIL] [--rules FIL]... [--log FIL]
 #
 # Claude faar kun Read/Grep/Glob/Task: ingen Bash, ingen skrivning, intet net.
 # Exit 0 = gyldigt resultat skrevet. Alt andet er en fejl (og blokerer i CI).
@@ -14,7 +14,7 @@ ENGINE="$(cd "${MANILENS_ENGINE:-$HERE/../engine}" && pwd)"
 CLAUDE="${MANILENS_CLAUDE:-claude}"
 MODEL="${MANILENS_MODEL:-claude-opus-5}"
 
-SRC="" DIFF="" META="" OUT="" TOOLS="" PREVIOUS="" CONTEXT_BASE="" LOG="/dev/stderr"
+SRC="" DIFF="" META="" OUT="" TOOLS="" GRAPH="" CONTEXT="" HISTORY="" PREVIOUS="" CONTEXT_BASE="" LOG="/dev/stderr"
 RULES=("$ENGINE/regler/faelles.md")
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,6 +23,9 @@ while [ $# -gt 0 ]; do
     --meta) META="$2" ;;
     --out) OUT="$2" ;;
     --tools) TOOLS="$2" ;;
+    --graph) [ -f "$2" ] && GRAPH="$2" ;;
+    --context) [ -f "$2" ] && CONTEXT="$2" ;;
+    --history) [ -f "$2" ] && HISTORY="$2" ;;
     --previous) PREVIOUS="$2" ;;
     --context-base) CONTEXT_BASE="$2" ;;
     --rules) [ -f "$2" ] && RULES+=("$2") ;;
@@ -68,15 +71,15 @@ then
 fi
 
 ADD_DIRS=(--add-dir "$ENGINE" --add-dir "$(dirname "$DIFF")" --add-dir "$(dirname "$META")")
-for f in "$TOOLS" "$PREVIOUS" "${RULES[@]}"; do
+for f in "$TOOLS" "$GRAPH" "$CONTEXT" "$HISTORY" "$PREVIOUS" "${RULES[@]}"; do
   [ -n "$f" ] && ADD_DIRS+=(--add-dir "$(dirname "$f")")
 done
 
 # Stierne saettes ind med python, saa specialtegn i stier ikke kan braekke prompten.
 PROMPT="$(python3 - "$ENGINE/orchestrator.md" "$DIFF" "$META" "${TOOLS:-(ingen værktøjsoutput)}" \
-  "${PREVIOUS:-(ingen tidligere fund)}" "$ENGINE" "${RULES[@]}" <<'PY'
+  "${GRAPH:-(ingen kodegraf)}" "${CONTEXT:-(ingen issues eller CI-kontekst)}" "${HISTORY:-(ingen historik)}" "${PREVIOUS:-(ingen tidligere fund)}" "$ENGINE" "${RULES[@]}" <<'PY'
 import sys
-template, diff, meta, tools, previous, engine, *rules = sys.argv[1:]
+template, diff, meta, tools, graph, context, history, previous, engine, *rules = sys.argv[1:]
 text = open(template).read()
 import os
 # Modelfordeling: "fuld" bruger opus til alle fejl-/sikkerhedsreviewere; "sparsom"
@@ -88,7 +91,7 @@ models = {
 }.get(tier)
 if models is None:
     sys.exit(f"ukendt MANILENS_TIER: {tier}")
-for key, value in {"DIFF": diff, "META": meta, "TOOLS": tools, "PREVIOUS": previous,
+for key, value in {"DIFF": diff, "META": meta, "TOOLS": tools, "GRAPH": graph, "CONTEXT": context, "HISTORY": history, "PREVIOUS": previous,
                    "ENGINE": engine, "RULES": " og ".join(rules), **models}.items():
     text = text.replace("{{%s}}" % key, value)
 print(text)
