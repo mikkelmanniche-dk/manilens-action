@@ -24,6 +24,7 @@ import sys
 import github_api as gh
 from dommer import BLOCKING, MIN_CONFIDENCE, filter_confidence, is_confident, recompute_verdict  # noqa: F401 (brugt af tests)
 import render
+import tekster
 
 FP_RE = re.compile(r"<!-- manilens:fp=([0-9a-f]{12}) -->")
 # Et fund er lukket, naar botten selv har svaret i traaden med denne markoer (eller traaden er loest paa GitHub).
@@ -120,8 +121,12 @@ def open_finding_ids(comments, threads, bot):
 
 
 def is_minor_finding_comment(body):
-    """Kun bottens egen fund-kommentar starter med alvorligheden (render.finding). Ukendt = blokerende."""
-    return (body or "").startswith(f"_{render.SEVERITY['mindre']}_")
+    """Kun bottens egen fund-kommentar starter med alvorligheden (render.finding). Ukendt = blokerende.
+
+    Alle sprog godtages: skifter kollegaen sprog, er de aeldre kommentarer skrevet paa det
+    gamle sprog, og de skal stadig kunne laeses. Kun bottens egne kommentarer naar hertil."""
+    start = (body or "")
+    return any(start.startswith(f"_{table['severity_mindre']}_") for table in tekster.TEKSTER.values())
 
 
 def open_bot_comments(repo, pr, bot):

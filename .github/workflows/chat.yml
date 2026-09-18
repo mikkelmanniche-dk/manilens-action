@@ -46,6 +46,7 @@ jobs:
       base: ${{ steps.ctx.outputs.base }}
       number: ${{ steps.ctx.outputs.number }}
       engine_sha: ${{ steps.token.outputs.engine_sha }}
+      language: ${{ steps.token.outputs.language }}
     steps:
       - name: Token til at læse og svare på PR'en
         id: token
@@ -62,19 +63,26 @@ jobs:
           if [ "$STATUS" != "200" ]; then
             MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/token.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
             rm -f "$RUNNER_TEMP/token.json"
-            echo "::error::${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            echo "::error::${MSG:-The ManiLens broker did not respond (HTTP $STATUS).}"
             exit 1
           fi
           TOKEN="$(jq -r '.data.token // empty' "$RUNNER_TEMP/token.json")"
           SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/token.json")"
+          # Sproget kommer allerede her og ikke foerst fra admit: naeste trin svarer paa de
+          # lokale kommandoer (help, fix prompt, pause, resume) og springer admit helt over.
+          # En ukendt vaerdi bliver dansk; brokeren er betroet, men svaret bruges i miljoeet.
+          LANG_CODE="$(jq -r '.data.language // "da"' "$RUNNER_TEMP/token.json")"
+          case "$LANG_CODE" in da|en) ;; *) LANG_CODE=da ;; esac
           rm -f "$RUNNER_TEMP/token.json"
           echo "::add-mask::$TOKEN"
           if [ -z "$TOKEN" ] || ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Brokeren gav et ugyldigt svar."
+            echo "::error::The broker returned an invalid response."
             exit 1
           fi
           echo "GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "MANILENS_LANGUAGE=$LANG_CODE" >> "$GITHUB_ENV"
           echo "engine_sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "language=$LANG_CODE" >> "$GITHUB_OUTPUT"
 
       - name: Hent motoren på den bekræftede SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,11 +104,12 @@ jobs:
           read_ctx() { python3 -c 'import json,os,sys; print(json.load(open(os.environ["RUNNER_TEMP"]+"/context.json"))[sys.argv[1]])' "$1"; }
           if [ "$(read_ctx same_repo)" != "True" ]; then echo "PR fra en fork: ManiLens svarer ikke"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           MODE="$(read_ctx mode)"; HEAD="$(read_ctx head)"; BASE="$(read_ctx base)"; NUMBER="$(read_ctx number)"
-          [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] && [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] && [[ "$NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Ugyldig kontekst."; exit 1; }
-          case "$MODE" in chat|review|"full review") ;; *) echo "::error::Ukendt tilstand."; exit 1 ;; esac
+          [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] && [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] && [[ "$NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Invalid context."; exit 1; }
+          case "$MODE" in chat|review|"full review") ;; *) echo "::error::Unknown mode."; exit 1 ;; esac
           { echo "skip=false"; echo "mode=$MODE"; echo "head=$HEAD"; echo "base=$BASE"; echo "number=$NUMBER"; } >> "$GITHUB_OUTPUT"
 
       - name: Adgang hos ManiLens
+        id: admit
         if: steps.ctx.outputs.skip != 'true'
         env:
           PR: ${{ steps.ctx.outputs.number }}
@@ -116,14 +125,14 @@ jobs:
             -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
           if [ "$STATUS" != "200" ]; then
             MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/admit.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
-            MSG="${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
-            { echo "### ManiLens kører ikke"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
+            MSG="${MSG:-The ManiLens broker did not respond (HTTP $STATUS).}"
+            { echo "### ManiLens is not running"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::$MSG"
             exit 1
           fi
           SHA="$(jq -r '.data.engine_sha // empty' "$RUNNER_TEMP/admit.json")"
           if [ "$SHA" != "$TOKEN_SHA" ]; then
-            echo "::error::Motor-SHA fra admit matcher ikke token-kaldet."
+            echo "::error::The engine SHA from admit does not match the token call."
             exit 2
           fi
 
@@ -207,6 +216,7 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           MODEL: ${{ inputs.model }}
+          MANILENS_LANGUAGE: ${{ needs.adgang.outputs.language }}
         run: |
           npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" >/dev/null
           mkdir -p "$RUNNER_TEMP/out"
@@ -215,6 +225,8 @@ jobs:
           t = open("manilens/engine/chat.md").read()
           t = t.replace("{{CONTEXT}}", os.environ["RUNNER_TEMP"] + "/ctx/context.json")
           t = t.replace("{{DIFF}}", os.environ["RUNNER_TEMP"] + "/diff.patch")
+          # Kollegaens sprogvalg fra brokerens admit-svar; ukendt vaerdi bliver dansk.
+          t = t.replace("{{LANGUAGE}}", {"da": "Danish", "en": "English"}.get((os.environ.get("MANILENS_LANGUAGE") or "").strip().lower(), "Danish"))
           print(t)
           PY
           )"
@@ -260,7 +272,7 @@ jobs:
           if [ "$STATUS" != "200" ]; then
             MSG="$(jq -r '.error.message // empty' "$RUNNER_TEMP/token.json" 2>/dev/null | tr -d '\r\n' | head -c 300 || true)"
             rm -f "$RUNNER_TEMP/token.json"
-            echo "::error::${MSG:-ManiLens-brokeren svarede ikke (HTTP $STATUS).}"
+            echo "::error::${MSG:-The ManiLens broker did not respond (HTTP $STATUS).}"
             exit 1
           fi
           TOKEN="$(jq -r '.data.token // empty' "$RUNNER_TEMP/token.json")"
@@ -268,7 +280,7 @@ jobs:
           rm -f "$RUNNER_TEMP/token.json"
           echo "::add-mask::$TOKEN"
           if [ -z "$TOKEN" ] || [ "$SHA" != "$ADMITTED_SHA" ]; then
-            echo "::error::Motor-SHA fra token-kaldet matcher ikke den godkendte."
+            echo "::error::The engine SHA from the token call does not match the approved one."
             exit 2
           fi
           echo "GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"

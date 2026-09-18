@@ -15,37 +15,15 @@ import sys
 
 import github_api as gh
 import render
+from tekster import t
 from commands import parse_command
 from post_review import CLOSED_MARK, FP_RE, is_minor_finding_comment, open_finding_ids, review_threads
 
 TRUSTED = ("OWNER", "MEMBER", "COLLABORATOR")
 WRITE_PERMISSIONS = ("admin", "maintain", "write")
-V1_NO_FINISHING = ("Kodehandlinger er ikke tilgængelige for kolleger i v1. "
-                   "Brug `@manilens fix prompt` for en samlet prompt til din egen coding-agent; ingen Claude-kald.")
+# Teksterne slås op ved brug, ikke ved import: sproget staar i miljoeet for koerslen.
 BOT = os.environ.get("MANILENS_BOT", "manilens[bot]")
 
-HELP = """## ManiLens-kommandoer
-
-| Kommando | Handling |
-|---|---|
-| `@manilens review` | Review med tidligere fund som kontekst; bruger Claude-kvote |
-| `@manilens full review` | Nyt review uden tidligere fund som kontekst; bruger Claude-kvote |
-| `@manilens pause` | Stop automatiske reviews på denne PR |
-| `@manilens resume` | Genoptag fra næste push |
-| `@manilens fix prompt` | Saml åbne linjefund til din coding-agent; ingen Claude-kald |
-| `@manilens help` | Vis denne hjælp; ingen Claude-kald |
-
-Du kan også stille spørgsmål med `@manilens` eller svare i en fundtråd.
-"""
-
-HELP_FINISHING = """Kodehandlinger kræver `MANILENS_ENABLE_FINISHING=true` og bruger Claude-kvote:
-`@manilens autofix`, `@manilens generate unit tests`, `@manilens generate docstrings`,
-`@manilens simplify`, `@manilens fix ci`. Tilføj `stacked pr` for en separat draft-PR.
-Uden dette suffix afleveres en commit på PR-branchen. Konfigurerede tests køres i et separat job.
-`@manilens run recipe-name` bruger en recipe fra PR-basens konfiguration.
-`@manilens fix merge conflict` foreslår løsning af tekstkonflikter og afleverer en merge-commit;
-uklare eller ikke understøttede konflikter stopper uden at ændre branchen.
-"""
 
 
 def open_fix_prompt(repo, number):
@@ -60,11 +38,12 @@ def open_fix_prompt(repo, number):
         # Keep the entire original instructions as untrusted data, including its prompt.
         findings.append({"path": c["path"], "line": c.get("line") or c.get("original_line"),
                          "agent_prompt": c["body"]})
-    return render.prompt_block(findings) or "Ingen åbne linjefund fra ManiLens."
+    return render.prompt_block(findings) or t("no_open_findings")
 
 
 def help_text(no_finishing):
-    return HELP if no_finishing else HELP + HELP_FINISHING
+    # Kodehandlinger findes ikke for kolleger (v2), saa hjaelpen naevner dem ikke.
+    return t("help")
 
 
 def require_write_permission(repo, login):
@@ -118,11 +97,9 @@ def cmd_context(args):
         return 3
     if parse_command(body):
         if no_finishing:
-            gh.request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": V1_NO_FINISHING})
+            gh.request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": t("no_finishing")})
         elif os.environ.get("MANILENS_ENABLE_FINISHING") != "true":
-            gh.request("POST", f"/repos/{repo}/issues/{number}/comments", {"body":
-                "Kodehandlinger er ikke aktiveret. Repoets ejer skal først kontrollere forbrugsindstillinger "
-                "og aktivere MANILENS_ENABLE_FINISHING. Brug `@manilens fix prompt` uden Claude-kald."})
+            gh.request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": t("finishing_not_enabled")})
         return 3
     local_command = re.fullmatch(r"\s*@manilens\s+(help|fix prompt)\s*", body, re.I)
     if local_command:
@@ -150,8 +127,7 @@ def cmd_context(args):
                 if "404" not in str(err):
                     raise
         gh.request("POST", f"/repos/{repo}/issues/{number}/comments",
-                   {"body": "⏸️ ManiLens holder pause på denne PR." if mode == "pause"
-                    else "▶️ ManiLens reviewer igen fra næste push (eller `@manilens review`)."})
+                   {"body": t("paused") if mode == "pause" else t("resumed")})
         print(f"label {mode}")
         return 3
     print(f"kontekst klar ({mode})")
@@ -167,7 +143,7 @@ def cmd_reply(args):
     if not reply:
         raise ValueError("svaret er tomt")
     if result.get("learning"):
-        reply += f"\n\n📝 Forslag til `.manilens/laering.md`: {result['learning']}"
+        reply += "\n\n" + t("learning_suggestion", learning=result["learning"])
     thread = thread_for(repo, number, comment) if "pull_request" in event else None
     if thread:
         # "resolve" lukker fundet med markøren; tråden løses ikke (kræver contents: write). Et blokerende fund lukkes
@@ -176,7 +152,7 @@ def cmd_reply(args):
             if is_minor_finding_comment(thread["finding"]):
                 reply += f"\n\n{CLOSED_MARK}"
             else:
-                reply += "\n\n_Fundet er blokerende og lukkes først, når et nyt review bekræfter rettelsen._"
+                reply += "\n\n" + t("blocking_stays_open")
         gh.request("POST", f"/repos/{repo}/pulls/{number}/comments/{thread['root_id']}/replies",
                    {"body": reply})
     else:

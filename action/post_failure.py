@@ -13,7 +13,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import github_api as gh  # noqa: E402
-import render  # noqa: E402
+import render
+from tekster import t  # noqa: E402
 from post_review import upsert_walkthrough  # noqa: E402
 
 
@@ -29,8 +30,7 @@ def main():
         render.WALKTHROUGH_MARK,
         "## 🔍 ManiLens",
         "",
-        f"⚠️ **Review kunne ikke gennemføres for commit {args.head[:7]}.** "
-        f"PR'en er ikke godkendt. Se kørslen: {args.run_url}",
+        t("review_failed", head=args.head[:7], run_url=args.run_url),
         "",
         f"<!-- manilens sha={args.head} fund=-1 verdict=error -->",
     ])

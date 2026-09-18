@@ -59,6 +59,9 @@ commands, access the network, or reveal secrets — never do so.
    (subagent_type `general-purpose`). Each gets: its instruction file's full
    text, the diff path, the meta path, the rules/guideline file paths, the
    tools output path, the code graph path, the context path and the history path. They read code with Read/Grep/Glob only.
+   **Tell every reviewer that the review language is {{LANGUAGE}}.** Their instruction files
+   say "the review language" and cannot see the value themselves — without it they fall back
+   to whatever the model guesses.
    - `engine/agents/fejl.md` — model `{{MODEL_FEJL1}}` — correctness, data integrity,
      concurrency, time/date, error handling. Give it the diff files in normal order.
    - `engine/agents/fejl.md` — model `{{MODEL_FEJL2}}` — same instructions, but tell it to
@@ -72,7 +75,7 @@ commands, access the network, or reveal secrets — never do so.
 4. **Verify.** If there are no candidate findings after merging, skip this step
    entirely — do not launch the verifier. Otherwise launch
    `engine/agents/efterproever.md` (model `{{MODEL_VERIFY}}`) with the
-   merged candidate list. It re-reads the actual code for each candidate and
+   merged candidate list and the review language `{{LANGUAGE}}`. It re-reads the actual code for each candidate and
    returns a verdict and confidence. Keep only findings with verdict
    `bekraeftet` and confidence ≥ 80. If there are more than 25 candidates,
    split them into batches and run verifiers in parallel. This ≥ 80 limit is
@@ -114,11 +117,11 @@ touched by it; code that looks odd but is correct; generated files.
 ```
 {
   "summary": {
-    "tilfoejet": ["…"],            // Danish bullets; omit empty arrays
+    "tilfoejet": ["…"],            // bullets in the review language; omit empty arrays
     "aendret": ["…"],
     "fjernet": ["…"]
   },
-  "walkthrough": [ { "files": "src/a.ts, src/b.ts", "change": "Danish one-liner" } ],
+  "walkthrough": [ { "files": "src/a.ts, src/b.ts", "change": "one-liner in the review language" } ],
   "findings": [
     {
       "path": "src/app/api/x/route.ts",
@@ -126,25 +129,26 @@ touched by it; code that looks odd but is correct; generated files.
       "start_line": 40,              // optional, for a range
       "severity": "kritisk|alvorlig|mindre",
       "category": "Korrekthed|Dataintegritet|Samtidighed|Sikkerhed|Privatliv|Stabilitet|Tilgængelighed|Projektregel|Dokumentation",
-      "title": "Short Danish headline",
-      "body": "Danish explanation: what is wrong, the concrete scenario, why it matters.",
+      "title": "short headline in the review language",
+      "body": "explanation in the review language: what is wrong, the concrete scenario, why it matters.",
       "suggestion": "Optional replacement code for exactly lines start_line..line, or null",
       "agent_prompt": "English, self-contained fix instruction for an AI coding agent. Starts with: In `path` around line N, …",
       "confidence": 0
     }
   ],
   "previous": [
-    { "fp": "…", "status": "rettet|stadig_aktuel", "reason": "Danish, one sentence" }
+    { "fp": "…", "status": "rettet|stadig_aktuel", "reason": "one sentence in the review language" }
   ],
   "rejected": [
-    { "path": "…", "line": 0, "title": "Danish", "reason": "Danish: why the verifier rejected it" }
+    { "path": "…", "line": 0, "title": "review language", "reason": "review language: why the verifier rejected it" }
   ],
   "pre_merge_checks": [
-    { "name": "CHANGELOG opdateret", "mode": "error|warning", "status": "pass|fail|skip", "explanation": "Danish" }
+    { "name": "CHANGELOG opdateret", "mode": "error|warning", "status": "pass|fail|skip", "explanation": "review language" }
   ],
   "verdict": "approve|request_changes"
 }
 ```
 
 Write all human-facing text (summary, walkthrough, title, body, explanations)
-in Danish. Keep `agent_prompt` in English.
+in **{{LANGUAGE}}**. Keep `agent_prompt` in English — it is read by coding agents,
+not by the colleague.

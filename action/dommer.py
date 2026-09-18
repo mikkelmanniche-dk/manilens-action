@@ -10,6 +10,7 @@ Et resultat med andet verdict end approve/request_changes (fx error) røres aldr
 import json
 import sys
 from pathlib import Path
+from tekster import t
 
 BLOCKING = ("kritisk", "alvorlig")
 MIN_CONFIDENCE = 80
@@ -30,9 +31,9 @@ def filter_confidence(result):
             kept.append(f)
         else:
             value = f.get("confidence")
-            reason = (f"under dommerens grænse (confidence {value} < {MIN_CONFIDENCE})"
+            reason = (t("below_threshold", value=value, minimum=MIN_CONFIDENCE)
                       if isinstance(value, (int, float)) and not isinstance(value, bool)
-                      else f"under dommerens grænse (confidence mangler eller er ugyldig, kræver >= {MIN_CONFIDENCE})")
+                      else t("confidence_missing", minimum=MIN_CONFIDENCE))
             dropped.append({"path": f.get("path"), "line": f.get("line", 0),
                             "title": f.get("title", ""), "reason": reason})
     result["findings"] = kept

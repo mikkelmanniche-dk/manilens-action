@@ -91,8 +91,10 @@ models = {
 }.get(tier)
 if models is None:
     sys.exit(f"ukendt MANILENS_TIER: {tier}")
+# Sproget kommer fra kollegaens konto via brokerens admit-svar; ukendt vaerdi bliver dansk.
+language = {"da": "Danish", "en": "English"}.get((os.environ.get("MANILENS_LANGUAGE") or "").strip().lower(), "Danish")
 for key, value in {"DIFF": diff, "META": meta, "TOOLS": tools, "GRAPH": graph, "CONTEXT": context, "HISTORY": history, "PREVIOUS": previous,
-                   "ENGINE": engine, "RULES": " og ".join(rules), **models}.items():
+                   "ENGINE": engine, "RULES": " og ".join(rules), "LANGUAGE": language, **models}.items():
     text = text.replace("{{%s}}" % key, value)
 print(text)
 PY

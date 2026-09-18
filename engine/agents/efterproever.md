@@ -27,7 +27,7 @@ Return a JSON array (no prose), one entry per candidate, in input order:
 
 ```
 [{"index":0,"verdict":"bekraeftet|afvist","confidence":0,"severity":"kritisk|alvorlig|mindre",
-  "line":0,"start_line":null,"reason":"Danish, one or two sentences"}]
+  "line":0,"start_line":null,"reason":"one or two sentences in the review language"}]
 ```
 
 `confidence` is 0–100: how sure you are that a competent maintainer, shown the

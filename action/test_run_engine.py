@@ -42,7 +42,7 @@ class RunEngine(unittest.TestCase):
         self.calls = self.tmp / "calls.jsonl"
         (self.tmp / "meta.json").write_text('{"repo": "a/b", "number": 1, "title": "t", "body": ""}')
 
-    def run_engine(self, diff, previous=None, tier="sparsom", graph=None, context=None, history=None):
+    def run_engine(self, diff, previous=None, tier="sparsom", graph=None, context=None, history=None, language=None):
         (self.tmp / "diff.patch").write_text(diff)
         args = ["bash", str(HERE / "run_engine.sh"), "--src", str(self.tmp / "src"), "--diff", str(self.tmp / "diff.patch"),
                 "--meta", str(self.tmp / "meta.json"), "--out", str(self.tmp / "result.json"), "--log", str(self.tmp / "log")]
@@ -63,6 +63,9 @@ class RunEngine(unittest.TestCase):
             args += ["--history", str(self.tmp / "hist" / "historik.md")]
         env = {**os.environ, "MANILENS_CLAUDE": str(self.claude), "FAKE_CALLS": str(self.calls),
                "CLAUDE_CODE_OAUTH_TOKEN": "test", "MANILENS_TIER": tier}
+        env.pop("MANILENS_LANGUAGE", None)
+        if language is not None:
+            env["MANILENS_LANGUAGE"] = language
         env.pop("CI", None)
         proc = subprocess.run(args, env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr + (self.tmp / "log").read_text(errors="replace"))
@@ -108,6 +111,43 @@ class RunEngine(unittest.TestCase):
         [prompt] = self.prompts()
 
         self.assertIn("`engine/agents/sikkerhed.md` — model `opus`", prompt)
+
+
+    def test_the_prompt_says_danish_by_default(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"))
+        [prompt] = self.prompts()
+
+        self.assertIn("in **Danish**", prompt)
+        self.assertNotIn("{{LANGUAGE}}", prompt)
+
+    def test_the_prompt_switches_to_english(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"), language="en")
+        [prompt] = self.prompts()
+
+        self.assertIn("in **English**", prompt)
+        self.assertNotIn("Danish", prompt)
+
+    def test_an_unknown_language_falls_back_to_danish_in_the_prompt(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"), language="de")
+        [prompt] = self.prompts()
+
+        self.assertIn("in **Danish**", prompt)
+
+    def test_the_reviewers_are_told_the_language(self):
+        # Agentfilerne siger kun "the review language" og kan ikke se erstatningen selv;
+        # står sproget ikke i fan out-afsnittet, gætter modellen (målt: instruktionen manglede).
+        self.run_engine(chunk("src/a.py", "+x = 1\n"), language="en")
+        [prompt] = self.prompts()
+        fan_out = prompt.split("**Fan out.**")[1].split("**Merge.**")[0]
+
+        self.assertIn("review language is English", fan_out)
+
+    def test_the_verifier_is_told_the_language(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"), language="en")
+        [prompt] = self.prompts()
+        verify = prompt.split("**Verify.**")[1].split("**Judge")[0] if "**Judge" in prompt else prompt.split("**Verify.**")[1]
+
+        self.assertIn("review language `English`", verify)
 
     def test_code_graph_path_reaches_the_prompt_and_the_readable_dirs(self):
         self.run_engine(chunk("src/a.py", "+x = 1\n"), graph="# Kodegraf\n")
