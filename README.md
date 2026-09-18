@@ -45,3 +45,32 @@ Se [SECURITY.md](SECURITY.md).
 
 Proprietær, alle rettigheder forbeholdt — se [LICENSE](LICENSE). Adgang på manilens.mikkelmanniche.dk giver
 kun ret til at kalde workflowene fra egne private, ikke-kommercielle repos, så længe godkendelsen gælder.
+
+## Tredjepartsværktøjer
+
+Licensen ovenfor gælder ikke de værktøjer og regler, `tjek` henter under kørslen. De ligger ikke i dette repo og
+hentes fra deres egne udgivelser på faste versioner (se `action/install_scanners.sh`), bl.a. opengrep (LGPL-2.1),
+ruff, zizmor, oxlint, golangci-lint, trivy, osv-scanner, actionlint og gitleaks under deres egne licenser.
+
+Opengreps regler hentes fra [opengrep/opengrep-rules](https://github.com/opengrep/opengrep-rules) på commit
+`f1d2b562b414783763fd02a6ed2736eaed622efa` og er omfattet af denne licensbetingelse:
+
+> "Commons Clause" License Condition v1.0
+>
+> The Software is provided to you by the Licensor under the License, as defined below, subject to the following
+> condition.
+>
+> Without limiting other conditions in the License, the grant of rights under the License will not include, and the
+> License does not grant to you, the right to Sell the Software.
+>
+> For purposes of the foregoing, "Sell" means practicing any or all of the rights granted to you under the License to
+> provide to third parties, for a fee or other consideration (including without limitation fees for hosting or
+> consulting/ support services related to the Software), a product or service whose value derives, entirely or
+> substantially, from the functionality of the Software. Any license notice or attribution required by the License
+> must also include this Commons Clause License Condition notice.
+>
+> Software: semgrep-rules (https://github.com/semgrep/semgrep-rules)
+> License: LGPL 2.1 (GNU Lesser General Public License, Version 2.1)
+> Licensor: Semgrep, Inc. (https://semgrep.dev)
+
+ManiLens tager ingen betaling og leverer ingen betalt ydelse.

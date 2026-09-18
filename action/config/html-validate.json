@@ -1,0 +1,19 @@
+{
+ "extends": [
+  "html-validate:document",
+  "html-validate:a11y"
+ ],
+ "rules": {
+  "no-inline-style": "off",
+  "no-trailing-whitespace": "off",
+  "void-style": "off",
+  "attribute-boolean-style": "off",
+  "attribute-empty-style": "off",
+  "no-raw-characters": "off",
+  "long-title": "off",
+  "no-redundant-role": "off",
+  "require-sri": "off",
+  "no-implicit-button-type": "off",
+  "prefer-native-element": "off"
+ }
+}

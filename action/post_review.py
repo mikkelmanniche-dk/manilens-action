@@ -4,7 +4,8 @@
   post_review.py --repo ejer/navn --pr 12 --head <sha> --result result.json
 
 Goer i denne raekkefoelge:
-  1. Markerer tidligere fund som rettet og loeser deres traade.
+  1. Svarer "Rettet" paa tidligere fund og lukker dem med CLOSED_MARK (traaden loeses ikke:
+     resolveReviewThread kraever contents: write, som ManiLens ikke har — maalt 17/9).
   2. Poster nye fund som kommentarer i koden (fund uden for diff'en kommer i
      review-teksten), uden at gentage fund der allerede staar aabne.
   3. Afgiver review: REQUEST_CHANGES ved blokerende fund, ellers APPROVE.
@@ -21,10 +22,14 @@ import re
 import sys
 
 import github_api as gh
+from dommer import BLOCKING, MIN_CONFIDENCE, filter_confidence, is_confident, recompute_verdict  # noqa: F401 (brugt af tests)
 import render
 
-BLOCKING = ("kritisk", "alvorlig")
 FP_RE = re.compile(r"<!-- manilens:fp=([0-9a-f]{12}) -->")
+# Et fund er lukket, naar botten selv har svaret i traaden med denne markoer (eller traaden er loest paa GitHub).
+CLOSED_MARK = "<!-- manilens:lukket -->"
+# Dommerens grænse (MIN_CONFIDENCE) håndhæves i dommer.py; review.yml anvender den på result.json før oversigt og post,
+# og main() anvender den igen, så et result.json uden normalisering aldrig blokerer på et usikkert fund.
 
 
 def fingerprint(finding):
@@ -103,6 +108,22 @@ def scanner_gate(path, head):
     return None
 
 
+def open_finding_ids(comments, threads, bot):
+    """Id'er paa bottens fund-kommentarer i traade, der hverken er loest eller lukket af botten selv.
+
+    Kun bottens egne svar taeller: skriver en anden CLOSED_MARK i traaden, forbliver fundet aabent."""
+    unresolved = {first_id for _, resolved, first_id in threads if not resolved}
+    closed = {c["in_reply_to_id"] for c in comments
+              if c.get("in_reply_to_id") and (c.get("user") or {}).get("login") == bot
+              and (c.get("user") or {}).get("type") == "Bot" and CLOSED_MARK in (c.get("body") or "")}
+    return unresolved - closed
+
+
+def is_minor_finding_comment(body):
+    """Kun bottens egen fund-kommentar starter med alvorligheden (render.finding). Ukendt = blokerende."""
+    return (body or "").startswith(f"_{render.SEVERITY['mindre']}_")
+
+
 def open_bot_comments(repo, pr, bot):
     comments = gh.paginate(f"/repos/{repo}/pulls/{pr}/comments")
     ours = {}
@@ -112,7 +133,7 @@ def open_bot_comments(repo, pr, bot):
         match = FP_RE.search(c["body"])
         if match:
             ours[match.group(1)] = c
-    open_ids = {first_id for _, resolved, first_id in review_threads(repo, pr) if not resolved}
+    open_ids = open_finding_ids(comments, review_threads(repo, pr), bot)
     return {fp: c for fp, c in ours.items() if c["id"] in open_ids}
 
 
@@ -137,24 +158,23 @@ def review_threads(repo, pr):
         cursor = page["pageInfo"]["endCursor"]
 
 
-def resolve_thread(repo, pr, comment_id):
-    for thread_id, resolved, first_id in review_threads(repo, pr):
-        if first_id == comment_id and not resolved:
-            gh.graphql("mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}}}",
-                       {"id": thread_id})
-
-
 def close_fixed(repo, pr, head, result, existing):
-    fixed = 0
+    """Svar "Rettet" med CLOSED_MARK. Et svar, der fejler, stopper ikke resten: fundet forbliver aabent
+    og vurderes igen ved naeste review (og blokerer, til det er lukket). Returnerer de lukkede fingeraftryk."""
+    closed = set()
     for prev in result.get("previous", []):
         comment = existing.get(prev.get("fp"))
         if not comment or prev.get("status") != "rettet":
             continue
-        gh.request("POST", f"/repos/{repo}/pulls/{pr}/comments/{comment['id']}/replies",
-                   {"body": f"✅ Rettet i commit {head[:7]}. {render.clean(prev.get('reason', ''))}".strip()})
-        resolve_thread(repo, pr, comment["id"])
-        fixed += 1
-    return fixed
+        text = f"✅ Rettet i commit {head[:7]}. {render.clean(prev.get('reason', ''))}".strip()
+        try:
+            gh.request("POST", f"/repos/{repo}/pulls/{pr}/comments/{comment['id']}/replies",
+                       {"body": f"{text}\n\n{CLOSED_MARK}"})
+        except gh.GitHubError as err:
+            print(f"::warning::Kunne ikke svare 'Rettet' på fund {prev.get('fp')}: {err}")
+            continue
+        closed.add(prev["fp"])
+    return closed
 
 
 def build_review(result, existing, allowed):
@@ -216,20 +236,23 @@ def main():
     with open(args.result) as fh:
         result = json.load(fh)
     validate(result)
+    filter_confidence(result)
     gate_error = scanner_gate(args.checks, args.head)
     if gate_error:
         result.setdefault("pre_merge_checks", []).append({"name": "Faste tjek",
             "mode": "error", "status": "fail", "explanation": gate_error})
+    result["verdict"] = recompute_verdict(result)
     require_current_head(args.repo, args.pr, args.head)
 
     existing = open_bot_comments(args.repo, args.pr, args.bot)
-    fixed = close_fixed(args.repo, args.pr, args.head, result, existing)
+    fixed_fps = close_fixed(args.repo, args.pr, args.head, result, existing)
+    fixed = len(fixed_fps)
     files = gh.paginate(f"/repos/{args.repo}/pulls/{args.pr}/files")
     inline, outside = build_review(result, existing, commentable_lines(files))
 
     blocking = [f for f in result.get("findings", []) if f["severity"] in BLOCKING]
     blocked = is_blocked(result)
-    fixed_fps = {p.get("fp") for p in result.get("previous", []) if p.get("status") == "rettet"}
+    # Kun fund, hvis "Rettet"-svar faktisk blev postet, er lukkede; et fejlet svar blokerer stadig.
     blocked = blocked or bool(set(existing) - fixed_fps)
     event = "REQUEST_CHANGES" if blocked else "APPROVE"
 

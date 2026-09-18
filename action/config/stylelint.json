@@ -1,0 +1,9 @@
+{"rules": {
+  "color-no-invalid-hex": true, "function-calc-no-unspaced-operator": true, "unit-no-unknown": true,
+  "property-no-unknown": true, "declaration-block-no-duplicate-properties": [true, {"ignore": ["consecutive-duplicates-with-different-values"]}],
+  "selector-pseudo-class-no-unknown": true, "selector-pseudo-element-no-unknown": true,
+  "keyframe-declaration-no-important": true, "no-invalid-position-at-import-rule": true,
+  "no-invalid-double-slash-comments": true, "string-no-newline": true, "media-feature-name-no-unknown": true,
+  "at-rule-no-unknown": [true, {"ignoreAtRules": ["tailwind","apply","layer","config","theme","plugin","custom-variant","source","utility","variant"]}],
+  "annotation-no-unknown": true, "declaration-block-no-shorthand-property-overrides": true
+}}

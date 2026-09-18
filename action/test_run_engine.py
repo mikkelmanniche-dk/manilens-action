@@ -42,13 +42,25 @@ class RunEngine(unittest.TestCase):
         self.calls = self.tmp / "calls.jsonl"
         (self.tmp / "meta.json").write_text('{"repo": "a/b", "number": 1, "title": "t", "body": ""}')
 
-    def run_engine(self, diff, previous=None, tier="sparsom"):
+    def run_engine(self, diff, previous=None, tier="sparsom", graph=None, context=None, history=None):
         (self.tmp / "diff.patch").write_text(diff)
         args = ["bash", str(HERE / "run_engine.sh"), "--src", str(self.tmp / "src"), "--diff", str(self.tmp / "diff.patch"),
                 "--meta", str(self.tmp / "meta.json"), "--out", str(self.tmp / "result.json"), "--log", str(self.tmp / "log")]
         if previous is not None:
             (self.tmp / "previous.json").write_text(json.dumps(previous))
             args += ["--previous", str(self.tmp / "previous.json")]
+        if graph is not None:
+            (self.tmp / "graf").mkdir(exist_ok=True)
+            (self.tmp / "graf" / "graph.md").write_text(graph)
+            args += ["--graph", str(self.tmp / "graf" / "graph.md")]
+        if context is not None:
+            (self.tmp / "kontekst").mkdir(exist_ok=True)
+            (self.tmp / "kontekst" / "kontekst.md").write_text(context)
+            args += ["--context", str(self.tmp / "kontekst" / "kontekst.md")]
+        if history is not None:
+            (self.tmp / "hist").mkdir(exist_ok=True)
+            (self.tmp / "hist" / "historik.md").write_text(history)
+            args += ["--history", str(self.tmp / "hist" / "historik.md")]
         env = {**os.environ, "MANILENS_CLAUDE": str(self.claude), "FAKE_CALLS": str(self.calls),
                "CLAUDE_CODE_OAUTH_TOKEN": "test", "MANILENS_TIER": tier}
         env.pop("CI", None)
@@ -96,6 +108,45 @@ class RunEngine(unittest.TestCase):
         [prompt] = self.prompts()
 
         self.assertIn("`engine/agents/sikkerhed.md` — model `opus`", prompt)
+
+    def test_code_graph_path_reaches_the_prompt_and_the_readable_dirs(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"), graph="# Kodegraf\n")
+        [call] = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        prompt = call[call.index("-p") + 1]
+        self.assertIn(str(self.tmp / "graf" / "graph.md"), prompt)
+        self.assertIn(str(self.tmp / "graf"), [call[i + 1] for i, a in enumerate(call) if a == "--add-dir"])
+
+    def test_context_path_reaches_the_prompt_and_the_readable_dirs(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"), context="# Kontekst\n")
+        [call] = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        prompt = call[call.index("-p") + 1]
+        self.assertIn(str(self.tmp / "kontekst" / "kontekst.md"), prompt)
+        self.assertIn(str(self.tmp / "kontekst"), [call[i + 1] for i, a in enumerate(call) if a == "--add-dir"])
+
+    def test_history_path_reaches_the_prompt_and_the_readable_dirs(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"), history="# Historik\n")
+        [call] = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        prompt = call[call.index("-p") + 1]
+        self.assertIn(str(self.tmp / "hist" / "historik.md"), prompt)
+        self.assertIn(str(self.tmp / "hist"), [call[i + 1] for i, a in enumerate(call) if a == "--add-dir"])
+
+    def test_without_history_the_prompt_says_so(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"))
+        [prompt] = self.prompts()
+        self.assertIn("(ingen historik)", prompt)
+        self.assertNotIn("{{HISTORY}}", prompt)
+
+    def test_without_context_the_prompt_says_so(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"))
+        [prompt] = self.prompts()
+        self.assertIn("(ingen issues eller CI-kontekst)", prompt)
+        self.assertNotIn("{{CONTEXT}}", prompt)
+
+    def test_without_a_graph_the_prompt_says_so(self):
+        self.run_engine(chunk("src/a.py", "+x = 1\n"))
+        [prompt] = self.prompts()
+        self.assertIn("(ingen kodegraf)", prompt)
+        self.assertNotIn("{{GRAPH}}", prompt)
 
     def test_prompt_skips_the_verifier_when_there_are_no_candidates(self):
         self.run_engine(chunk("src/a.py", "+x = 1\n"))

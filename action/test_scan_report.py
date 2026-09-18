@@ -45,7 +45,7 @@ class Collect(unittest.TestCase):
             json.dump(data, fh)
 
     def test_findings_far_from_changes_and_in_untouched_files_are_dropped(self):
-        self.write("semgrep.json", {"results": [
+        self.write("opengrep.json", {"results": [
             {"check_id": "php.injection", "path": "./api/x.php", "start": {"line": 12},
              "extra": {"severity": "ERROR", "message": "SQL injection"}},
             {"check_id": "php.old", "path": "api/x.php", "start": {"line": 90},
@@ -76,15 +76,15 @@ class Collect(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertIn("ruff", notes[0])
 
-    def test_semgrep_parse_warnings_keep_coverage_complete(self):
-        self.write("semgrep.json", {"results": [], "errors": [
+    def test_opengrep_parse_warnings_keep_coverage_complete(self):
+        self.write("opengrep.json", {"results": [], "errors": [
             {"level": "warn", "type": ["PartialParsing", []], "message": "bash snippet in yaml"}]})
         _, notes = sr.collect(self.dir, {})
         self.assertEqual(notes, [])
 
-    def test_semgrep_real_or_unknown_errors_mark_coverage_incomplete(self):
+    def test_opengrep_real_or_unknown_errors_mark_coverage_incomplete(self):
         for error in ({"level": "error", "message": "rule failed"}, {"message": "no level"}):
-            self.write("semgrep.json", {"results": [], "errors": [error]})
+            self.write("opengrep.json", {"results": [], "errors": [error]})
             _, notes = sr.collect(self.dir, {})
             self.assertFalse(sr.check_status(None, notes, "sha")["complete"], error)
 
@@ -105,15 +105,84 @@ class Collect(unittest.TestCase):
         self.assertEqual(status["failed_checks"], ["npm test"])
 
 
+class NewParsers(unittest.TestCase):
+    """Formaterne er målt 17/9 med opengrep 1.30.0, zizmor 1.30.1, oxlint 1.83.0 og golangci-lint 2.13.2."""
+
+    def test_opengrep_rule_ids_lose_the_rules_directory_prefix(self):
+        data = {"errors": [], "results": [{
+            "check_id": "home.runner.work._temp.scanners.opengrep-rules.php.lang.security.eval-use",
+            "path": "src/a.php", "start": {"line": 3},
+            "extra": {"severity": "ERROR", "message": "Evaluating non-constant commands."}}]}
+        self.assertEqual(list(sr.parse_opengrep(data)), [{
+            "tool": "opengrep", "rule": "php.lang.security.eval-use", "severity": "error",
+            "path": "src/a.php", "line": 3, "message": "Evaluating non-constant commands."}])
+
+    def test_zizmor_uses_primary_locations_one_based_and_skips_ignored(self):
+        def finding(ident, severity, kind, row, ignored=False, annotation="note"):
+            return {"ident": ident, "desc": f"{ident} desc", "ignored": ignored,
+                    "determinations": {"severity": severity, "confidence": "High"},
+                    "locations": [{"symbolic": {"key": {"Local": {"verbatim_path": ".github/workflows/ci.yml"}},
+                                                "annotation": annotation, "kind": kind},
+                                   "concrete": {"location": {"start_point": {"row": row, "column": 0}}}}]}
+        data = [finding("template-injection", "High", "Primary", 9, annotation="may expand into attacker-controllable code"),
+                finding("template-injection", "High", "Related", 9),
+                finding("unpinned-uses", "High", "Hidden", 6),
+                finding("artipacked", "Medium", "Primary", 6, ignored=True)]
+        self.assertEqual(list(sr.parse_zizmor(data)), [{
+            "tool": "zizmor", "rule": "template-injection", "severity": "high", "path": ".github/workflows/ci.yml",
+            "line": 10, "message": "template-injection desc: may expand into attacker-controllable code"}])
+
+    def test_oxlint_parse_errors_and_rule_codes(self):
+        data = {"diagnostics": [
+            {"message": "Checking equality with NaN will always return false", "code": "eslint(use-isnan)",
+             "severity": "error", "help": "Use the `isNaN` function.", "filename": "src/a.ts",
+             "labels": [{"span": {"offset": 21, "length": 3, "line": 2, "column": 10}}]},
+            {"message": "Expected `,` or `)` but found `:`", "severity": "error", "filename": "src/b.js",
+             "labels": [{"label": "expected", "span": {"offset": 66, "length": 1, "line": 3, "column": 20}}]},
+            {"message": "Suspicious", "code": "eslint(no-useless-concat)", "severity": "warning",
+             "filename": "src/c.js", "labels": []}]}
+        self.assertEqual(list(sr.parse_oxlint(data)), [
+            {"tool": "oxlint", "rule": "eslint(use-isnan)", "severity": "error", "path": "src/a.ts", "line": 2,
+             "message": "Checking equality with NaN will always return false — Use the `isNaN` function."},
+            {"tool": "oxlint", "rule": "parse-error", "severity": "error", "path": "src/b.js", "line": 3,
+             "message": "Expected `,` or `)` but found `:`"},
+            {"tool": "oxlint", "rule": "eslint(no-useless-concat)", "severity": "warning", "path": "src/c.js",
+             "line": None, "message": "Suspicious"}])
+
+    def test_golangci_findings_and_typecheck_is_left_out(self):
+        data = {"Issues": [
+            {"FromLinter": "govet", "Text": "printf: fmt.Printf format %d has arg \"tekst\" of wrong type string",
+             "Severity": "", "Pos": {"Filename": "main.go", "Line": 10, "Column": 2}},
+            {"FromLinter": "typecheck", "Text": ": # example.com/x\n./main.go:12:6: declared and not used: y",
+             "Severity": "", "Pos": {"Filename": "main.go", "Line": 1, "Column": 0}}], "Report": {}}
+        self.assertEqual(list(sr.parse_golangci(data)), [
+            {"tool": "golangci-lint", "rule": "govet", "severity": "warning", "path": "main.go", "line": 10,
+             "message": "printf: fmt.Printf format %d has arg \"tekst\" of wrong type string"}])
+
+    def test_golangci_typecheck_becomes_a_note_about_code_that_does_not_compile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "golangci.json"), "w") as fh:
+                json.dump({"Issues": [{"FromLinter": "typecheck", "Text": "x", "Pos": {"Filename": "main.go", "Line": 1}}]}, fh)
+            findings, notes = sr.collect(tmp, {"main.go": {1}})
+        self.assertEqual(findings, [])
+        self.assertEqual(notes, ["golangci-lint: Go-koden kompilerer ikke, så Go-tjekkene er ufuldstændige"])
+
+    def test_report_names_the_detected_languages(self):
+        text = sr.render([], [], None, languages="PHP, TypeScript")
+        self.assertIn("Sprog i PR'en: PHP, TypeScript", text)
+        self.assertIn("Sprog i PR'en: ingen genkendte", sr.render([], [], None, languages=""))
+        self.assertNotIn("Sprog i PR'en", sr.render([], [], None))
+
+
 class RuleCounts(unittest.TestCase):
     def test_counts_per_tool_rule_and_severity_most_first(self):
         f = lambda tool, rule, sev, line: {"tool": tool, "rule": rule, "severity": sev, "path": "a.py", "line": line, "message": "m"}
-        rows = sr.rule_counts([f("ruff", "S608", "error", 1), f("ruff", "S608", "error", 2), f("semgrep", "x.y", "warning", 3),
+        rows = sr.rule_counts([f("ruff", "S608", "error", 1), f("ruff", "S608", "error", 2), f("opengrep", "x.y", "warning", 3),
                                f("ruff", "S608", "warning", 4)])
         self.assertEqual(rows, [
             {"tool": "ruff", "rule": "S608", "severity": "error", "count": 2},
+            {"tool": "opengrep", "rule": "x.y", "severity": "warning", "count": 1},
             {"tool": "ruff", "rule": "S608", "severity": "warning", "count": 1},
-            {"tool": "semgrep", "rule": "x.y", "severity": "warning", "count": 1},
         ])
 
     def test_counts_are_capped_and_long_names_cut_to_the_broker_limits(self):
@@ -140,13 +209,14 @@ class ScannerProcess(unittest.TestCase):
             git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qam", "head")
             for name, script in {
                 "gitleaks": "exit 2",
-                "semgrep": 'while [ "$1" != "-o" ]; do shift; done; shift; printf \'{"results":[]}\' > "$1"',
+                "opengrep": 'while [ "$1" != "-o" ]; do shift; done; shift; printf \'{"results":[]}\' > "$1"',
                 "trivy": 'while [ "$1" != "--output" ]; do shift; done; shift; printf \'{"Results":[]}\' > "$1"',
             }.items():
                 p = bins / name
                 p.write_text("#!/bin/bash\n" + script + "\n")
                 p.chmod(0o700)
             (bins / "python3").symlink_to(sys.executable)
+            (bins / "opengrep-rules/generic/secrets").mkdir(parents=True)
             report = root / "tools.md"
             run = subprocess.run(["bash", str(Path(__file__).with_name("scanners.sh")),
                                   str(repo), base, str(bins), str(report)],
@@ -157,8 +227,8 @@ class ScannerProcess(unittest.TestCase):
             self.assertEqual(status["failed_checks"], ["gitleaks"])
             self.assertNotIn("gitleaks — OK", report.read_text())
             # A scanner can emit valid partial JSON and still fail.
-            semgrep = bins / "semgrep"
-            semgrep.write_text(semgrep.read_text() + "exit 2\n")
+            opengrep = bins / "opengrep"
+            opengrep.write_text(opengrep.read_text() + "exit 2\n")
             run = subprocess.run(["bash", str(Path(__file__).with_name("scanners.sh")),
                                   str(repo), base, str(bins), str(report)],
                                  env=dict(os.environ, PATH="/usr/bin:/bin", MANILENS_SKIP_REPO_CHECKS="1"),
@@ -166,7 +236,18 @@ class ScannerProcess(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             status = json.loads(Path(str(report) + ".status.json").read_text())
             self.assertFalse(status["complete"])
-            self.assertTrue(any("semgrep" in note for note in status["notes"]))
+            self.assertTrue(any("opengrep" in note for note in status["notes"]))
+
+
+
+class ChangedLinesPaths(unittest.TestCase):
+    def test_paths_with_spaces_and_quoted_unicode_keep_their_changed_lines(self):
+        # git sætter en tabulator efter stier med mellemrum og citerer stier med æ/ø/å (core.quotePath), målt 17/9.
+        diff = ('diff --git a/dir with space/b.py b/dir with space/b.py\n--- a/dir with space/b.py\t\n'
+                '+++ b/dir with space/b.py\t\n@@ -2 +2 @@\n-    return 1\n+    return 2\n'
+                'diff --git "a/m\\303\\246ppe/a fil.py" "b/m\\303\\246ppe/a fil.py"\n--- "a/m\\303\\246ppe/a fil.py"\t\n'
+                '+++ "b/m\\303\\246ppe/a fil.py"\t\n@@ -2 +2 @@\n-    return 1\n+    return 2\n')
+        self.assertEqual(sr.changed_lines(diff), {"dir with space/b.py": {2}, "mæppe/a fil.py": {2}})
 
 
 if __name__ == "__main__":

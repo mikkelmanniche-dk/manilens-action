@@ -41,6 +41,43 @@ class Chat(unittest.TestCase):
             code = chat.cmd_context(args)
         return code, calls
 
+    def run_reply(self, thread_action, severity='_🟡 Mindre_ | _Ydeevne_'):
+        ev = event('Det er en falsk alarm', login='kollega')
+        ev['comment']['in_reply_to_id'] = 1
+        ev['pull_request'] = {'number': 12}
+        (self.dir / 'event.json').write_text(json.dumps(ev))
+        (self.dir / 'reply.json').write_text(json.dumps({'reply': 'Du har ret, fundet gælder ikke.', 'thread_action': thread_action}))
+        root = {'id': 1, 'user': {'login': 'manilens[bot]', 'type': 'Bot'}, 'body': f'{severity}\n\n**Fund**\n\n<!-- manilens:fp=abcdefabcdef -->',
+                'path': 'a.py', 'line': 3}
+        calls = []
+
+        def fake(method, url, body=None):
+            calls.append((method, url, body))
+            return {'permission': 'write'} if url.endswith('/permission') else {}
+
+        args = argparse.Namespace(event=str(self.dir / 'event.json'), result=str(self.dir / 'reply.json'))
+        with patch.object(chat.gh, 'request', side_effect=fake), patch.object(chat.gh, 'paginate', return_value=[root]), \
+                patch.object(chat.gh, 'graphql') as graphql, patch('builtins.print'):
+            self.assertEqual(chat.cmd_reply(args), 0)
+        graphql.assert_not_called()
+        return [c for c in calls if c[0] == 'POST']
+
+    def test_resolve_action_closes_finding_with_mark_instead_of_resolving_thread(self):
+        posts = self.run_reply('resolve')
+        self.assertEqual(posts[0][1], '/repos/kollega/projekt/pulls/12/comments/1/replies')
+        self.assertIn('<!-- manilens:lukket -->', posts[0][2]['body'])
+
+    def test_chat_never_closes_a_blocking_finding(self):
+        for severity in ('_🔴 Kritisk_ | _Sikkerhed_', '_🟠 Alvorlig_ | _Korrekthed_', '**Fund uden alvorlighed**'):
+            with self.subTest(severity=severity):
+                posts = self.run_reply('resolve', severity=severity)
+                self.assertNotIn('<!-- manilens:lukket -->', posts[0][2]['body'])
+                self.assertIn('nyt review', posts[0][2]['body'])
+
+    def test_keep_open_reply_has_no_closed_mark(self):
+        posts = self.run_reply('keep_open')
+        self.assertNotIn('<!-- manilens:lukket -->', posts[0][2]['body'])
+
     def test_collaborator_with_only_read_permission_is_refused_without_comment(self):
         with self.assertRaises(PermissionError):
             self.run_context(event(association='COLLABORATOR'), permission='read')

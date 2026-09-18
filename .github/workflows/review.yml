@@ -4,7 +4,8 @@
 # Fire job, adskilt af sikkerhedshensyn:
 #   forbered  OIDC → /api/admit (godkendt, installeret, dagsloft). Ingen checkout, ingen artefakter.
 #   tjek      kører PR'ens kode og scannere UDEN hemmeligheder og uden id-token
-#   review    læser koden med Claude (ingen Bash); har Claude-tokenet, men kun læseadgang og intet id-token
+#   review    læser koden med Claude (ingen Bash); har Claude-tokenet, men kun læseadgang og intet id-token.
+#             Henter først linkede issues og CI-logs for head-commit'en med github.token (issues/actions: read).
 #   post      OIDC → /api/token (ét repo, en time) og skriver reviewet som manilens[bot]; kører aldrig PR-kode
 # Motoren hentes altid fra mikkelmanniche-dk/manilens-action på den SHA, brokeren bekræfter —
 # aldrig fra et artefakt. Artefakter bærer kun data.
@@ -100,7 +101,16 @@ jobs:
         with:
           deno-version: v2.9.6
 
+      # Kun downloads caches; install_scanners.sh bruger en cachet fil, hvis dens sha256 passer, ellers hentes den igen.
+      - name: Genbrug hentede scannere
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/scanner-cache
+          key: manilens-scanners-${{ runner.os }}-${{ hashFiles('manilens/action/install_scanners.sh') }}
+
       - name: Installer scannere (faste versioner, checksum-tjekket)
+        env:
+          MANILENS_SCANNER_CACHE: ${{ runner.temp }}/scanner-cache
         run: bash manilens/action/install_scanners.sh "$RUNNER_TEMP/scanners"
 
       - name: Kør faste tjek og scannere
@@ -114,6 +124,8 @@ jobs:
           path: |
             ${{ runner.temp }}/tools.md
             ${{ runner.temp }}/tools.md.status.json
+            ${{ runner.temp }}/graph.md
+            ${{ runner.temp }}/historik.md
             ${{ runner.temp }}/tools.md.counts.json
           retention-days: 3
 
@@ -124,6 +136,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      issues: read
+      actions: read
     steps:
       - name: Hent PR'ens kode (køres ikke)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,6 +187,20 @@ jobs:
             | python3 -c 'import json,sys; p=json.load(sys.stdin); json.dump({"repo":p["base"]["repo"]["full_name"],"number":p["number"],"title":p["title"],"body":p["body"] or ""}, sys.stdout, ensure_ascii=False)' > "$IN/meta.json"
           cd manilens/action && python3 collect_previous.py --repo "$REPO" --pr "$PR" --out "$IN/previous.json"
 
+      # Kun data og et tilvalg: fejler eller varer trinet for længe, reviewes uden konteksten.
+      # Venter højst 5 min på andre CI-kørsler for head-commit'en (denne kørsel tæller ikke).
+      - name: Linkede issues og CI-resultat
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          cd manilens/action && python3 kontekst.py --repo "$REPO" --pr "$PR" --head "$HEAD_SHA" \
+            --run-id "$GITHUB_RUN_ID" --out "$RUNNER_TEMP/in/kontekst.md" --max-wait 300
+
       - name: ManiLens reviewer
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -181,8 +209,12 @@ jobs:
         run: |
           IN="$RUNNER_TEMP/in"
           bash manilens/action/run_engine.sh --src pr --diff "$IN/diff.patch" --meta "$IN/meta.json" \
-            --tools "$IN/tools.md" --previous "$IN/previous.json" \
+            --tools "$IN/tools.md" --graph "$IN/graph.md" --context "$IN/kontekst.md" --history "$IN/historik.md" --previous "$IN/previous.json" \
             --context-base "$BASE_SHA" --out "$IN/result.json" --log "$RUNNER_TEMP/engine.log"
+
+      # Dommerens grænse i kode (ikke kun prompt): oversigt og GitHub-review skal vise de samme fund.
+      - name: Anvend dommerens grænse
+        run: python3 manilens/action/dommer.py "$RUNNER_TEMP/in/result.json"
 
       # Oversigten er et tilvalg: fejler den, skal selve reviewet stadig postes.
       - name: Byg review-oversigt (kun data)
