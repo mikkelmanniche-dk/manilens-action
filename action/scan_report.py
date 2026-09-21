@@ -290,6 +290,57 @@ def check_status(logs_dir, notes, head):
     return {"head_sha": head, "complete": not notes, "failed_checks": failed, "notes": notes}
 
 
+def execution_status(plan_path, events_path, findings, notes=()):
+    """Missing evidence is an error, not an empty successful scan."""
+    plan = _load(plan_path) if plan_path else None
+    if not isinstance(plan, dict):
+        return [], []
+    events = []
+    if events_path and os.path.exists(events_path):
+        with open(events_path) as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        events.append(row)
+                except ValueError:
+                    pass
+    rows, errors = [], []
+    aliases = {'deno': 'deno-lint'}
+    for entry in plan['tools']:
+        tool = entry['tool']
+        if tool == 'ast-grep':  # optional code graph, not a quality gate
+            continue
+        runs = [e for e in events if e.get('tool') == tool]
+        count = sum(f['tool'] == aliases.get(tool, tool) for f in findings)
+        selected = entry['selected']
+        tool_notes = [n for n in notes if n.startswith(tool + ':') or n.startswith(aliases.get(tool, tool) + ':')]
+        state = ('skipped' if not selected else 'error' if tool_notes or not runs or any(r.get('status') == 'error' for r in runs)
+                 else 'findings' if count or (tool == 'gitleaks' and any(r.get('exit_code') == 1 for r in runs)) else 'passed')
+        reason = entry['reason'] if not selected else 'No completed execution evidence' if not runs else None
+        if tool_notes:
+            reason = '; '.join(tool_notes)
+        elif state == 'error' and runs:
+            reason = '; '.join(r.get('reason') or f"exit {r.get('exit_code', '?')}" for r in runs if r.get('status') == 'error')
+        rows.append({**entry, 'status': state, 'reason': reason, 'findings': count,
+                     'duration_ms': sum(r.get('duration_ms', 0) for r in runs), 'files': len(plan['changed_files'])})
+        if state == 'error':
+            errors.append(f'{tool}: tjekket er ikke gennemført')
+    rows.extend(e for e in events if e.get('tool') not in {t['tool'] for t in plan['tools']})
+    return rows, errors
+
+
+def render_execution(rows):
+    def safe(value):
+        return re.sub(r'[\r\n|`<>]', ' ', str(value or '—'))[:180]
+    lines = ['## Tjek / Checks', '', '| Tjek | Version | Omfang | Resultat | Fund | Tid | Årsag |',
+             '|---|---|---|---|---|---|---|']
+    for r in rows:
+        lines.append('| ' + ' | '.join(safe(x) for x in (r['tool'], r.get('version'), r.get('scope'),
+                     r['status'], str(r.get('findings', 0)), f"{r.get('duration_ms', 0) / 1000:.1f}s", r.get('reason'))) + ' |')
+    return '\n'.join(lines) + '\n\n'
+
+
 def dedupe(findings):
     seen, out = set(), []
     for f in findings:
@@ -360,6 +411,8 @@ def main():
     ap.add_argument("--head", default="")
     ap.add_argument("--notes")
     ap.add_argument("--languages", help="fil med sprogene fra sprog.py")
+    ap.add_argument("--plan")
+    ap.add_argument("--events")
     args = ap.parse_args()
     global REPO_ROOT
     if args.root:
@@ -374,10 +427,16 @@ def main():
     if args.languages and os.path.exists(args.languages):
         with open(args.languages, errors="replace") as fh:
             languages = fh.read().strip()
+    checks, execution_errors = execution_status(args.plan, args.events, findings, notes)
+    notes.extend(execution_errors)
     with open(args.out, "w") as fh:
-        fh.write(render(findings, notes, args.logs, languages))
+        fh.write((render_execution(checks) if checks else '') + render(findings, notes, args.logs, languages))
     with open(args.out + ".status.json", "w") as fh:
-        json.dump(check_status(args.logs, notes, args.head), fh, ensure_ascii=False, indent=2)
+        status = check_status(args.logs, notes, args.head)
+        status['checks'] = checks
+        status['findings_count'] = len(findings)
+        status['findings'] = findings[:100]
+        json.dump(status, fh, ensure_ascii=False, indent=2)
     with open(args.out + ".counts.json", "w") as fh:
         json.dump(rule_counts(findings), fh, ensure_ascii=False)
     print(f"{len(findings)} scannerfund i ændrede linjer")

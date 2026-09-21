@@ -1,9 +1,11 @@
 # ManiLens v2 — review af en PR i kollegaens eget repo med kollegaens eget Claude-abonnement.
 # Kaldes fra .github/workflows/manilens.yml (skabelon: templates/manilens-v2.yml), låst til fuld SHA.
 #
-# Fire job, adskilt af sikkerhedshensyn:
-#   forbered  OIDC → /api/admit (godkendt, installeret, dagsloft). Ingen checkout, ingen artefakter.
+# Job adskilt af sikkerhedshensyn:
+#   configuration kontrollerer kun, om Claude-tokenet er angivet.
+#   forbered  OIDC → /api/admit (godkendt, installeret, separat scannerloft). Ingen checkout/artefakter.
 #   tjek      kører PR'ens kode og scannere UDEN hemmeligheder og uden id-token
+#   ai_admit  kontrollerer AI-kvoten efter scannerne, kun når tokenet er angivet.
 #   review    læser koden med Claude (ingen Bash); har Claude-tokenet, men kun læseadgang og intet id-token.
 #             Henter først linkede issues og CI-logs for head-commit'en med github.token (issues/actions: read).
 #   post      OIDC → /api/token (ét repo, en time) og skriver reviewet som manilens[bot]; kører aldrig PR-kode
@@ -19,7 +21,7 @@ on:
         default: claude-opus-5
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
-        required: true
+        required: false
 
 permissions: {}
 
@@ -35,6 +37,23 @@ env:
   MANILENS_TIER: sparsom
 
 jobs:
+  configuration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    outputs:
+      available: ${{ steps.token.outputs.available }}
+    steps:
+      - id: token
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
   forbered:
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'manilens:pause') && !contains(github.event.pull_request.body, '@manilens ignore')
     runs-on: ubuntu-latest
@@ -54,7 +73,7 @@ jobs:
           OIDC="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
           echo "::add-mask::$OIDC"
-          BODY="$(jq -nc --argjson pr "$PR" '{purpose: "review", pr: $pr}')"
+          BODY="$(jq -nc --argjson pr "$PR" '{purpose: "scan", pr: $pr}')"
           STATUS="$(curl -sS -A "$MANILENS_UA" -o "$RUNNER_TEMP/admit.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/admit" \
             -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY" || true)"
           if [ "$STATUS" != "200" ]; then
@@ -100,30 +119,49 @@ jobs:
           persist-credentials: false
           path: manilens
 
+      - name: Planlæg scannere og delprojekter
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 manilens/action/scanner_plan.py pr "$BASE_SHA" "$RUNNER_TEMP/scanner-plan.json"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.plan.outputs.node == 'true'
         with:
           node-version: 24
 
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        if: steps.plan.outputs.deno == 'true'
         with:
           deno-version: v2.9.6
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        if: steps.plan.outputs.php == 'true'
+        with:
+          php-version: '8.5'
+          extensions: curl, json, mbstring, openssl, pdo, pdo_sqlite, sodium
+          coverage: none
+          tools: composer
 
       # Kun downloads caches; install_scanners.sh bruger en cachet fil, hvis dens sha256 passer, ellers hentes den igen.
       - name: Genbrug hentede scannere
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/scanner-cache
-          key: manilens-scanners-${{ runner.os }}-${{ hashFiles('manilens/action/install_scanners.sh') }}
+          key: manilens-scanners-${{ runner.os }}-${{ hashFiles('manilens/action/install_scanners.sh') }}-${{ steps.plan.outputs.cache_key }}
 
       - name: Installer scannere (faste versioner, checksum-tjekket)
         env:
           MANILENS_SCANNER_CACHE: ${{ runner.temp }}/scanner-cache
-        run: bash manilens/action/install_scanners.sh "$RUNNER_TEMP/scanners"
+        run: bash manilens/action/install_scanners.sh "$RUNNER_TEMP/scanners" "$RUNNER_TEMP/scanner-plan.json"
 
       - name: Kør faste tjek og scannere
         env:
+          MANILENS_SCAN_PLAN: ${{ runner.temp }}/scanner-plan.json
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: bash manilens/action/scanners.sh pr "$BASE_SHA" "$RUNNER_TEMP/scanners" "$RUNNER_TEMP/tools.md"
+        run: |
+          bash manilens/action/scanners.sh pr "$BASE_SHA" "$RUNNER_TEMP/scanners" "$RUNNER_TEMP/tools.md"
+          cat "$RUNNER_TEMP/tools.md" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -136,8 +174,41 @@ jobs:
             ${{ runner.temp }}/tools.md.counts.json
           retention-days: 3
 
+  ai_admit:
+    needs: [forbered, tjek, configuration]
+    if: needs.configuration.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    outputs:
+      allowed: ${{ steps.admit.outputs.allowed }}
+      reason: ${{ steps.admit.outputs.reason }}
+    steps:
+      - name: Adgang til AI-review
+        id: admit
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          EXPECTED_SHA: ${{ needs.forbered.outputs.engine_sha }}
+        run: |
+          set -euo pipefail
+          OIDC="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$MANILENS_URL" | jq -r '.value')"
+          echo "::add-mask::$OIDC"
+          BODY="$(jq -nc --argjson pr "$PR" '{purpose: "review", pr: $pr, scanner_run: true}')"
+          STATUS="$(curl -sS -A "$MANILENS_UA" -o "$RUNNER_TEMP/ai.json" -w '%{http_code}' -X POST "$MANILENS_URL/api/admit" -H "Authorization: Bearer $OIDC" -H 'Content-Type: application/json' --data "$BODY")"
+          if [ "$STATUS" = 429 ] && [ "$(jq -r '.error.code' "$RUNNER_TEMP/ai.json")" = daily_cap ]; then
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=daily_cap" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$STATUS" = 200 ] && [ "$(jq -r '.data.engine_sha' "$RUNNER_TEMP/ai.json")" = "$EXPECTED_SHA" ] || exit 2
+          echo "allowed=true" >> "$GITHUB_OUTPUT"
+
   review:
-    needs: [forbered, tjek]
+    needs: [forbered, tjek, ai_admit]
+    if: needs.ai_admit.outputs.allowed == 'true'
+    outputs:
+      claude: ${{ steps.evidence.outputs.claude }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -220,6 +291,15 @@ jobs:
             --tools "$IN/tools.md" --graph "$IN/graph.md" --context "$IN/kontekst.md" --history "$IN/historik.md" --previous "$IN/previous.json" \
             --context-base "$BASE_SHA" --out "$IN/result.json" --log "$RUNNER_TEMP/engine.log"
 
+      - name: Bekræft faktisk Claude-kald
+        id: evidence
+        run: |
+          if [ -s "$RUNNER_TEMP/engine.log.raw.json" ]; then
+            echo "claude=verified" >> "$GITHUB_OUTPUT"
+          else
+            echo "claude=not_needed" >> "$GITHUB_OUTPUT"
+          fi
+
       # Dommerens grænse i kode (ikke kun prompt): oversigt og GitHub-review skal vise de samme fund.
       - name: Anvend dommerens grænse
         env:
@@ -257,7 +337,7 @@ jobs:
           retention-days: 14
 
   post:
-    needs: [forbered, tjek, review]
+    needs: [forbered, tjek, review, configuration, ai_admit]
     if: always() && needs.forbered.result == 'success'
     name: ManiLens
     runs-on: ubuntu-latest
@@ -334,14 +414,26 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           REVIEW_RESULT: ${{ needs.review.result }}
+          CLAUDE_STATE: ${{ needs.review.outputs.claude }}
+          TOKEN_AVAILABLE: ${{ needs.configuration.outputs.available }}
+          AI_REASON: ${{ needs.ai_admit.outputs.reason }}
           SNAPSHOT_URL: ${{ steps.snapshot.outputs.snapshot_url }}
         run: |
-          RESULT="$(find "$RUNNER_TEMP/out" -name result.json | head -1)"
-          if [ "$REVIEW_RESULT" != "success" ] || [ -z "$RESULT" ]; then
-            # Fail-closed: uden et gyldigt review bliver PR'en ikke godkendt.
-            python3 manilens/action/post_failure.py --repo "$REPO" --pr "$PR" --head "$HEAD" \
-              --run-url "$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"
-            exit 2
+          RESULT="$(find "$RUNNER_TEMP/out" -name result.json 2>/dev/null | head -1)"
+          AI=error
+          PUBLISHED=()
+          REVIEW_EXIT=2
+          if [ "$TOKEN_AVAILABLE" = false ]; then AI=missing_token; fi
+          if [ "$AI_REASON" = daily_cap ]; then AI=daily_cap; fi
+          if [ "$REVIEW_RESULT" = success ] && [ -n "$RESULT" ]; then
+            AI="$CLAUDE_STATE"
+            REVIEW_EXIT=0
+            python3 manilens/action/post_review.py --repo "$REPO" --pr "$PR" --head "$HEAD" --result "$RESULT" \
+              --checks "$RUNNER_TEMP/checks/tools.md.status.json" --snapshot-url "$SNAPSHOT_URL" || REVIEW_EXIT=$?
+            if [ "$REVIEW_EXIT" -le 1 ]; then PUBLISHED=(--published); fi
           fi
-          cd manilens/action && python3 post_review.py --repo "$REPO" --pr "$PR" --head "$HEAD" --result "$RESULT" \
-            --checks "$RUNNER_TEMP/checks/tools.md.status.json" --snapshot-url "$SNAPSHOT_URL"
+          STATUS_EXIT=0
+          python3 manilens/action/post_status.py --repo "$REPO" --pr "$PR" --head "$HEAD" \
+            --checks "$RUNNER_TEMP/checks/tools.md.status.json" --ai "$AI" "${PUBLISHED[@]}" \
+            --run-url "$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" || STATUS_EXIT=$?
+          [ "$REVIEW_EXIT" = 0 ] && [ "$STATUS_EXIT" = 0 ]

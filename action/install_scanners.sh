@@ -37,12 +37,21 @@ GITLEAKS_VERSION=8.30.1
 HTML_VALIDATE_VERSION=11.15.0
 STYLELINT_VERSION=17.15.0
 
+# Optional plan: only selected tools are downloaded. Legacy callers still install all.
+SELECTED="all"
+if [ -n "${2:-}" ]; then
+  SELECTED="$(python3 -c 'import json,sys; print(" ".join(t["tool"] for t in json.load(open(sys.argv[1]))["tools"] if t["selected"]))' "$2")"
+fi
+wants() { [ "$SELECTED" = all ] || [[ " $SELECTED " = *" $1 "* ]]; }
 CACHE="${MANILENS_SCANNER_CACHE:-}"
 [ -z "$CACHE" ] || mkdir -p "$CACHE"
 
 sha_ok() { echo "$1  $2" | shasum -a 256 -c - >/dev/null 2>&1; }
 
 fetch() {  # url sha256 destination
+  local tool="${3##*/}"
+  tool="${tool%%.*}"
+  wants "$tool" || return 0
   local tmp; tmp="$(mktemp)"
   if [ -n "$CACHE" ] && [ -f "$CACHE/$2" ] && cp "$CACHE/$2" "$tmp" && sha_ok "$2" "$tmp"; then
     mv "$tmp" "$3"
@@ -83,11 +92,11 @@ if [ "$OS" = linux ]; then
     2277d43b98ec0054280f2ac26b53268bae97682444678a59a657dd565da021d6 "$BIN/golangci-lint.tgz"
   fetch "$(gh_release ast-grep/ast-grep $AST_GREP_VERSION app-x86_64-unknown-linux-gnu.zip)" \
     f8ac830881339d1edee6b2652f54798c0f4da5a827f2db38a08ee31117783ce8 "$BIN/ast-grep.zip"
-  tar -xJf "$BIN/shellcheck.txz" -C "$BIN" --strip-components=1 "shellcheck-v$SHELLCHECK_VERSION/shellcheck"
-  tar -xzf "$BIN/gitleaks.tgz" -C "$BIN" gitleaks
-  tar -xzf "$BIN/ruff.tgz" -C "$BIN" --strip-components=1 ruff-x86_64-unknown-linux-gnu/ruff
-  tar -xzf "$BIN/oxlint.tgz" -C "$BIN" && mv "$BIN/oxlint-x86_64-unknown-linux-gnu" "$BIN/oxlint"
-  tar -xzf "$BIN/golangci-lint.tgz" -C "$BIN" --strip-components=1 "golangci-lint-$GOLANGCI_LINT_VERSION-linux-amd64/golangci-lint"
+  if wants shellcheck; then tar -xJf "$BIN/shellcheck.txz" -C "$BIN" --strip-components=1 "shellcheck-v$SHELLCHECK_VERSION/shellcheck"; fi
+  if wants gitleaks; then tar -xzf "$BIN/gitleaks.tgz" -C "$BIN" gitleaks; fi
+  if wants ruff; then tar -xzf "$BIN/ruff.tgz" -C "$BIN" --strip-components=1 ruff-x86_64-unknown-linux-gnu/ruff; fi
+  if wants oxlint; then tar -xzf "$BIN/oxlint.tgz" -C "$BIN" && mv "$BIN/oxlint-x86_64-unknown-linux-gnu" "$BIN/oxlint"; fi
+  if wants golangci-lint; then tar -xzf "$BIN/golangci-lint.tgz" -C "$BIN" --strip-components=1 "golangci-lint-$GOLANGCI_LINT_VERSION-linux-amd64/golangci-lint"; fi
 else
   fetch "$(gh_release aquasecurity/trivy v$TRIVY_VERSION trivy_${TRIVY_VERSION}_macOS-ARM64.tar.gz)" \
     1caada5e0e2091909357c7525d3aa76f4b660b13821bc143b190c7483e31cc11 "$BIN/trivy.tgz"
@@ -111,35 +120,42 @@ else
     f4bf83f0b64f055c42b28fc9a38861839f69c096e61c788e72dfaae412011789 "$BIN/golangci-lint.tgz"
   fetch "$(gh_release ast-grep/ast-grep $AST_GREP_VERSION app-aarch64-apple-darwin.zip)" \
     6d2279dea5bea2ad79c66ea93f5fe54ba926e398a8a26de76c56db68fe59eac6 "$BIN/ast-grep.zip"
-  tar -xzf "$BIN/ruff.tgz" -C "$BIN" --strip-components=1 ruff-aarch64-apple-darwin/ruff
-  tar -xzf "$BIN/oxlint.tgz" -C "$BIN" && mv "$BIN/oxlint-aarch64-apple-darwin" "$BIN/oxlint"
-  tar -xzf "$BIN/golangci-lint.tgz" -C "$BIN" --strip-components=1 "golangci-lint-$GOLANGCI_LINT_VERSION-darwin-arm64/golangci-lint"
+  if wants ruff; then tar -xzf "$BIN/ruff.tgz" -C "$BIN" --strip-components=1 ruff-aarch64-apple-darwin/ruff; fi
+  if wants oxlint; then tar -xzf "$BIN/oxlint.tgz" -C "$BIN" && mv "$BIN/oxlint-aarch64-apple-darwin" "$BIN/oxlint"; fi
+  if wants golangci-lint; then tar -xzf "$BIN/golangci-lint.tgz" -C "$BIN" --strip-components=1 "golangci-lint-$GOLANGCI_LINT_VERSION-darwin-arm64/golangci-lint"; fi
 fi
 
-tar -xzf "$BIN/trivy.tgz" -C "$BIN" trivy
-tar -xzf "$BIN/actionlint.tgz" -C "$BIN" actionlint
-tar -xzf "$BIN/zizmor.tgz" -C "$BIN" zizmor
-unzip -oq "$BIN/ast-grep.zip" ast-grep -d "$BIN"
+if wants trivy; then tar -xzf "$BIN/trivy.tgz" -C "$BIN" trivy; fi
+if wants actionlint; then tar -xzf "$BIN/actionlint.tgz" -C "$BIN" actionlint; fi
+if wants zizmor; then tar -xzf "$BIN/zizmor.tgz" -C "$BIN" zizmor; fi
+if wants ast-grep; then unzip -oq "$BIN/ast-grep.zip" ast-grep -d "$BIN"; fi
 fetch "$(gh_release phpstan/phpstan $PHPSTAN_VERSION phpstan.phar)" \
   a7d45c01d3bd5aceb2cb9e596a67e50ff9f12b8757a373b93c0761deb8cd77e1 "$BIN/phpstan.phar"
 rm -f "$BIN"/*.tgz "$BIN"/*.txz "$BIN"/*.zip
-chmod +x "$BIN"/trivy "$BIN"/osv-scanner "$BIN"/actionlint "$BIN"/hadolint "$BIN"/squawk \
-  "$BIN"/opengrep "$BIN"/ruff "$BIN"/zizmor "$BIN"/oxlint "$BIN"/golangci-lint "$BIN"/ast-grep
+for tool in trivy osv-scanner actionlint hadolint squawk opengrep ruff zizmor oxlint golangci-lint ast-grep shellcheck gitleaks; do
+  [ ! -f "$BIN/$tool" ] || chmod +x "$BIN/$tool"
+done
 
 # Opengreps regler: git afviser indhold, der ikke passer til commit-SHA'en.
+if wants opengrep; then
 rm -rf "$BIN/opengrep-rules"
 git init -q "$BIN/opengrep-rules"
 git -C "$BIN/opengrep-rules" fetch -q --depth 1 https://github.com/opengrep/opengrep-rules.git "$OPENGREP_RULES_COMMIT"
 git -C "$BIN/opengrep-rules" -c advice.detachedHead=false checkout -q FETCH_HEAD
 [ "$(git -C "$BIN/opengrep-rules" rev-parse HEAD)" = "$OPENGREP_RULES_COMMIT" ] || { echo "opengrep-rules: forkert commit" >&2; exit 1; }
 rm -rf "$BIN/opengrep-rules/.git"
+fi
 [ -f "$BIN/shellcheck" ] && chmod +x "$BIN/shellcheck"
 
 # HTML- og CSS-validering (stylelint fanger CSS-syntaksfejl som en løs "}") (npm, faste versioner, ingen install-scripts)
-mkdir -p "$BIN/npm"
-npm install --prefix "$BIN/npm" --no-audit --no-fund --ignore-scripts --silent \
-  "html-validate@$HTML_VALIDATE_VERSION" "stylelint@$STYLELINT_VERSION"
-ln -sf "$BIN/npm/node_modules/.bin/html-validate" "$BIN/html-validate"
-ln -sf "$BIN/npm/node_modules/.bin/stylelint" "$BIN/stylelint"
-
-echo "Scannere installeret i $BIN"
+PACKAGES=()
+wants html-validate && PACKAGES+=("html-validate@$HTML_VALIDATE_VERSION")
+wants stylelint && PACKAGES+=("stylelint@$STYLELINT_VERSION")
+if [ "${#PACKAGES[@]}" -gt 0 ]; then
+  mkdir -p "$BIN/npm"
+  npm install --prefix "$BIN/npm" --no-audit --no-fund --ignore-scripts --silent "${PACKAGES[@]}"
+  for tool in html-validate stylelint; do
+    if wants "$tool"; then ln -sf "$BIN/npm/node_modules/.bin/$tool" "$BIN/$tool"; fi
+  done
+fi
+echo "Scannere installeret i $BIN: $SELECTED"

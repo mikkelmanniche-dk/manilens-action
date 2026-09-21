@@ -4,8 +4,8 @@
 > offentligt, så GitHub Actions kan hente motoren. Kopiering, ændring, videregivelse og anden brug end
 > via ManiLens for godkendte brugere er ikke tilladt. Se [LICENSE](LICENSE).
 
-Genbrugelige GitHub Actions-workflows, der giver pull requests et AI-review fra `manilens[bot]`.
-Reviewet kører i **dit eget repo** med **dit eget Claude-abonnement**.
+Genbrugelige GitHub Actions-workflows med scannere og valgfrit AI-review fra `manilens[bot]`.
+Scannerne kører i **dit eget repo**. AI-review bruger **dit eget Claude-abonnement**.
 
 ## Hvem kan bruge det
 
@@ -20,11 +20,15 @@ installeret på repoet.
 
 ## Sådan virker det
 
-1. `forbered` spørger manilens.mikkelmanniche.dk med et GitHub OIDC-token, om repoet må reviewes,
-   og får den motor-SHA, der er godkendt.
-2. `tjek` kører faste scannere på PR'ens kode uden hemmeligheder.
-3. `review` læser koden med Claude (ingen shell, ingen skriveadgang).
-4. `post` får et kortlivet token til netop dit repo og poster reviewet.
+1. `forbered` kontrollerer adgang og den godkendte motor-SHA. Scannerne har et selvstændigt loft på 50 kørsler pr. ejer pr. UTC-døgn.
+2. `tjek` opdager delprojekter og relevante scannere, installerer kun de valgte værktøjer og kører uden hemmeligheder. Npm- og Composer-scripts samt Python-tests i undermapper indgår; manglende afhængigheder vises som fejl.
+3. `configuration` afgør kun, om et Claude-token findes. `ai_admit` kontrollerer derefter AI-kvoten i et separat job uden Claude-token.
+4. `review` læser koden med Claude (ingen shell eller skriveadgang), når token og kvote er tilgængelige.
+5. `post` opdaterer én PR-oversigt med scannerresultater, eventuelle AI-fund og årsagen til manglende kørsel. Uden et fuldført review afgives ingen merge-godkendelse; det samlede ManiLens-tjek forbliver blokeret.
+
+Scannere fortsætter uden Claude-token og efter AI-dagsgrænsen. Opsætningssiden viser verificeret workflow og seneste kørsel med tidspunkt. En scannerkørsel eller et tokennavn beviser ikke en Claude-forbindelse: den markeres først efter et vellykket modelkald. Statusmetadata opbevares i højst 30 dage plus næste oprydning.
+
+Rapporten viser version, omfang, resultat, fund og varighed pr. tjek. `passed` betyder gennemført uden rapporterede fund, `findings` betyder fund, `error` betyder ufuldstændigt eller fejlet tjek, og `skipped` har en forklaring. Typecheck/testfejl og ufuldstændig scannerdækning kan ikke overtrumfes af modellen.
 
 Motoren hentes altid fra dette repo på den godkendte, fulde commit-SHA.
 
