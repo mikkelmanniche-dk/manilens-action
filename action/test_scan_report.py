@@ -201,11 +201,11 @@ class ScannerProcess(unittest.TestCase):
             def git(*args):
                 return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
             git("init", "-q")
-            (repo / "file.txt").write_text("before\n")
+            (repo / "file.js").write_text("before\n")
             git("add", ".")
             git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
             base = git("rev-parse", "HEAD")
-            (repo / "file.txt").write_text("after\n")
+            (repo / "file.js").write_text("after\n")
             git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qam", "head")
             for name, script in {
                 "gitleaks": "exit 2",
